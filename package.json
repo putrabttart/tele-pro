@@ -1,0 +1,22 @@
+{
+  "name": "telegram-broadcast-manager",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w apps/api\" \"npm run dev -w apps/worker\" \"npm run dev -w apps/web\"",
+    "build": "npm run build -w apps/api && npm run build -w apps/worker && npm run build -w apps/web",
+    "start": "concurrently \"npm run start -w apps/api\" \"npm run start -w apps/worker\" \"npm run start -w apps/web\"",
+    "db:generate": "npm run prisma:generate -w apps/api",
+    "db:migrate": "npm run prisma:migrate -w apps/api",
+    "db:push": "npm run prisma:push -w apps/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "dependencies": {
+    "lucide-react": "^1.8.0"
+  }
+}

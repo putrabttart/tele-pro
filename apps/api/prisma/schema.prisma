@@ -1,0 +1,170 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum TelegramConnectionStatus {
+  CONNECTED
+  DISCONNECTED
+  PENDING
+}
+
+enum SendStatus {
+  SUCCESS
+  FAILED
+  PENDING
+  SKIPPED
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+}
+
+enum ScheduleType {
+  MANUAL
+  INTERVAL
+  CRON
+}
+
+enum SendMode {
+  NEW_MESSAGE
+  FORWARD
+}
+
+model TelegramAccount {
+  id               String                   @id @default(cuid())
+  label            String
+  phone            String                   @unique
+  encryptedSession String?
+  status           TelegramConnectionStatus @default(DISCONNECTED)
+  lastLoginAt      DateTime?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+  logs             SendLog[]
+}
+
+model Group {
+  id         String    @id @default(cuid())
+  telegramId String?   @unique
+  username   String?   @unique
+  title      String?
+  isActive   Boolean   @default(true)
+  tags       String[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  logs       SendLog[]
+}
+
+model MessageTemplate {
+  id         String    @id @default(cuid())
+  name       String
+  text       String
+  mediaUrl   String?
+  spinEnabled Boolean  @default(false)
+  isActive   Boolean   @default(true)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  logs       SendLog[]
+}
+
+model BroadcastSetting {
+  id                  String    @id @default(cuid())
+  name                String    @default("Default")
+  isActive            Boolean   @default(true)
+  batchSizeMin        Int       @default(10)
+  batchSizeMax        Int       @default(30)
+  messageDelayMinSec  Int       @default(20)
+  messageDelayMaxSec  Int       @default(90)
+  batchDelayMinMin    Int       @default(30)
+  batchDelayMaxMin    Int       @default(180)
+  sendMode            SendMode  @default(NEW_MESSAGE)
+  forwardSourceChatId String?
+  forwardMessageId    Int?
+  randomizeGroups     Boolean   @default(true)
+  autoPauseOnLimit    Boolean   @default(true)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  schedules           Schedule[]
+  runs                BroadcastRun[]
+}
+
+model Schedule {
+  id           String       @id @default(cuid())
+  name         String
+  type         ScheduleType
+  intervalHours Int?
+  cronExpr     String?
+  isActive     Boolean      @default(true)
+  lastRunAt    DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  settingId    String
+  setting      BroadcastSetting @relation(fields: [settingId], references: [id], onDelete: Restrict)
+  runs         BroadcastRun[]
+}
+
+model BroadcastRun {
+  id          String    @id @default(cuid())
+  label       String?
+  scheduleId  String?
+  schedule    Schedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  settingId   String
+  setting     BroadcastSetting @relation(fields: [settingId], references: [id], onDelete: Restrict)
+  requestedAccountId String?
+  requestedTemplateIds String[] @default([])
+  status      RunStatus @default(PENDING)
+  reason      String?
+  pausedUntil DateTime?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  totalGroups Int       @default(0)
+  sentCount   Int       @default(0)
+  failedCount Int       @default(0)
+  pendingCount Int      @default(0)
+  totalDurationHours Int?
+  intervalMinutes    Int?
+  completedCycles    Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  logs        SendLog[]
+}
+
+model SendLog {
+  id          String          @id @default(cuid())
+  runId       String
+  run         BroadcastRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  groupId     String
+  group       Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  accountId   String?
+  account     TelegramAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  templateId  String?
+  template    MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  status      SendStatus
+  errorCode   String?
+  errorMessage String?
+  timestamp   DateTime        @default(now())
+
+  @@index([status])
+  @@index([timestamp])
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  level     String
+  module    String
+  message   String
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([module])
+}
