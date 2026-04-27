@@ -2,15 +2,18 @@ import type { Request, Response } from "express";
 import { authService } from "./auth.service";
 
 class AuthController {
-  login(req: Request, res: Response) {
-    const result = authService.login(req.body.username, req.body.password);
+  async login(req: Request, res: Response) {
+    const result = await authService.login(req.body.email, req.body.password);
+    res.json(result);
+  }
+
+  async refresh(req: Request, res: Response) {
+    const result = await authService.refreshSession(req.body.refresh_token);
     res.json(result);
   }
 
   me(req: Request, res: Response) {
-    res.json({
-      user: req.user
-    });
+    res.json({ user: req.user });
   }
 }
 

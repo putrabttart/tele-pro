@@ -1,20 +1,47 @@
-import jwt from "jsonwebtoken";
+import { createClient } from "@supabase/supabase-js";
 import { env } from "../../config/env";
 import { ApiError } from "../../utils/api-error";
 
 class AuthService {
-  login(username: string, password: string) {
-    if (username !== env.ADMIN_USERNAME || password !== env.ADMIN_PASSWORD) {
-      throw new ApiError(401, "Invalid credentials");
-    }
+  async login(email: string, password: string) {
+    // Use anon-level client for login (not service role)
+    const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
 
-    const token = jwt.sign({ sub: username, role: "admin" }, env.JWT_SECRET, {
-      expiresIn: "12h"
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password
     });
 
+    if (error || !data.session) {
+      throw new ApiError(401, error?.message ?? "Login gagal. Periksa email dan password.");
+    }
+
     return {
-      token,
-      expiresIn: "12h"
+      access_token: data.session.access_token,
+      refresh_token: data.session.refresh_token,
+      expires_in: data.session.expires_in,
+      user: {
+        id: data.user.id,
+        email: data.user.email
+      }
+    };
+  }
+
+  async refreshSession(refreshToken: string) {
+    const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+
+    const { data, error } = await supabase.auth.refreshSession({
+      refresh_token: refreshToken
+    });
+
+    if (error || !data.session) {
+      throw new ApiError(401, "Session expired. Silakan login ulang.");
+    }
+
+    return {
+      access_token: data.session.access_token,
+      refresh_token: data.session.refresh_token,
+      expires_in: data.session.expires_in
     };
   }
 }

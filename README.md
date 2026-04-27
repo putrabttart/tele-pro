@@ -1,325 +1,277 @@
-# Telegram Broadcast Manager
+# BLAST TELE — Telegram Broadcast Manager
 
-Boilerplate full-stack untuk otomasi broadcast Telegram dengan kontrol penuh via dashboard web.
+Sistem otomasi broadcast Telegram dengan dashboard web, mendukung pengiriman pesan massal ke banyak group secara bersamaan (concurrent), dengan fitur auto-join group, crash recovery, dan monitoring real-time.
 
-## Stack
+## Tech Stack
 
-- Backend API: Node.js + Express + Prisma
-- Frontend: Next.js (App Router) + React
-- Database: Supabase PostgreSQL (atau PostgreSQL biasa)
-- Queue: Postgres-based run queue (tanpa Redis)
-- Telegram Client: MTProto via package `telegram` (gramJS)
-- Monorepo: npm workspaces
+| Layer | Teknologi |
+|-------|-----------|
+| **Frontend** | Next.js 14 (App Router) + React 18 + Bootstrap 5 |
+| **API** | Node.js + Express + Prisma ORM |
+| **Worker** | Node.js (polling-based, concurrent) |
+| **Database** | PostgreSQL via Supabase (cloud) |
+| **Auth** | Supabase Auth (email/password) |
+| **Telegram** | MTProto via GramJS (`telegram` package) |
+| **Monorepo** | npm workspaces |
 
-## Fitur Utama
+## Fitur
 
-- Dashboard login JWT
-- Status akun Telegram (connected/disconnected)
-- Statistik pengiriman (sent, failed, pending)
-- Group manager: create, toggle active, tagging, import text/file `.txt`, import link folder `t.me/addlist/...`
-- Message template manager: text/media, multi-template, spin text
-- Broadcast settings: batch, random delay, delay antar batch, send mode (new/forward), parse link pesan Telegram untuk forward
-- Scheduler: manual run, interval, cron-like repeat
-- Worker terpisah untuk memproses run pending dari Postgres
-- Anti-limit safety: limiter + random delay + auto pause untuk FloodWait/PeerFlood
-- Session management: request OTP, verify OTP, encrypted session storage
-- Logs monitoring + export CSV
-- Security baseline: JWT, rate limit API, validation, encrypted session
+### Broadcast
+- **Direct Message** — kirim teks langsung ke semua group
+- **Forward Link** — forward pesan dari channel/group sumber
+- **Batch Interval** — kirim berulang selama X jam, setiap Y menit
+- **Concurrent** — jalankan beberapa broadcast sekaligus (paralel)
+- **Nama Broadcast** — beri label untuk identifikasi di monitoring
 
-## Struktur Folder
+### Group Management
+- **Satu input** — paste link group, @username, link invite private, atau link addlist
+- **Auto-join** — akun Telegram otomatis join ke group yang ditambahkan
+- Format: `@username`, `t.me/group`, `t.me/+hash`, `t.me/joinchat/hash`, `t.me/addlist/slug`
+- Pencarian & pagination di daftar group
 
-```text
-.
-├─ docker-compose.yml
-├─ package.json
-├─ tsconfig.base.json
-├─ .env.example
-├─ README.md
-└─ apps
-   ├─ api
-   │  ├─ package.json
-   │  ├─ tsconfig.json
-   │  ├─ prisma
-   │  │  └─ schema.prisma
-   │  └─ src
-   │     ├─ app.ts
-   │     ├─ index.ts
-   │     ├─ routes.ts
-   │     ├─ config
-   │     │  ├─ env.ts
-  │     │  └─ prisma.ts
-   │     ├─ middleware
-   │     │  ├─ auth.ts
-   │     │  ├─ error.ts
-   │     │  └─ validate.ts
-   │     ├─ modules
-   │     │  ├─ auth
-   │     │  ├─ broadcast
-   │     │  ├─ dashboard
-   │     │  ├─ groups
-   │     │  ├─ logs
-   │     │  ├─ scheduler
-   │     │  ├─ settings
-   │     │  ├─ telegram
-   │     │  └─ templates
-   │     ├─ telegram
-   │     │  └─ mtproto-client.ts
-   │     ├─ types
-   │     │  └─ express.d.ts
-   │     └─ utils
-   ├─ worker
-   │  ├─ package.json
-   │  ├─ tsconfig.json
-   │  └─ src
-   │     ├─ index.ts
-   │     ├─ config
-   │     ├─ jobs
-   │     │  ├─ broadcast.worker.ts
-   │     │  └─ scheduler.worker.ts
-   │     ├─ telegram
-   │     │  └─ mtproto-sender.ts
-   │     └─ utils
-   └─ web
-      ├─ package.json
-      ├─ tsconfig.json
-      ├─ next.config.js
-      ├─ app
-      │  ├─ globals.css
-      │  ├─ layout.tsx
-      │  ├─ page.tsx
-      │  ├─ login/page.tsx
-      │  └─ dashboard/page.tsx
-      ├─ components
-      ├─ lib
-      └─ types
+### Monitoring
+- **Live dashboard** — kartu monitoring per broadcast aktif (Sent/Failed/Pending/Progress)
+- **Auto-refresh** — data update otomatis setiap 5-60 detik (configurable)
+- **Run History** — riwayat lengkap dengan nama, mode, pesan/link, status
+- **Send Logs** — detail error per group dengan penjelasan bahasa Indonesia
+- **Filter** — status (ALL/FAILED/SUCCESS) + rentang tanggal
+- **Pagination** — semua tabel mendukung pagination (5/10/20/50 per halaman)
+- **Export CSV** — download log pengiriman
+
+### Safety & Recovery
+- **Crash recovery** — jika server mati, broadcast otomatis dilanjutkan dari terakhir dikirim
+- **Graceful shutdown** — SIGINT/SIGTERM/crash ditangani, run tidak stuck
+- **SendLog deduplication** — group yang sudah terkirim tidak dikirim ulang saat resume
+- **FloodWait auto-pause** — otomatis pause & resume saat rate limit Telegram
+- **PeerFlood detection** — pause otomatis saat terdeteksi spam
+- **Delay & randomization** — delay antar pesan, antar batch, urutan group acak
+
+### Lainnya
+- Login via Supabase Auth (email/password, auto-refresh token)
+- Template manager (text, media URL, spin text)
+- Scheduler (manual, interval, cron)
+- Session Telegram terenkripsi (AES-256-GCM)
+- Dark mode
+- Responsive (mobile-friendly)
+
+## Struktur Project
+
+```
+BLAST-TELE/
+├── .env.example              # Template environment variables
+├── package.json              # Root monorepo config
+├── tsconfig.base.json        # Shared TypeScript config
+│
+├── apps/
+│   ├── api/                  # REST API Server (Express)
+│   │   ├── prisma/
+│   │   │   └── schema.prisma # Database schema
+│   │   └── src/
+│   │       ├── index.ts      # Entry point (:4000)
+│   │       ├── app.ts        # Express app setup
+│   │       ├── routes.ts     # Route registration
+│   │       ├── config/       # env, prisma client
+│   │       ├── middleware/    # auth, error, validate
+│   │       ├── modules/      # Fitur per modul:
+│   │       │   ├── auth/         # Login JWT
+│   │       │   ├── broadcast/    # Create & manage runs
+│   │       │   ├── dashboard/    # Overview stats
+│   │       │   ├── groups/       # Group CRUD + auto-join
+│   │       │   ├── logs/         # Send logs + activity
+│   │       │   ├── scheduler/    # Cron/interval schedules
+│   │       │   ├── settings/     # Broadcast settings
+│   │       │   ├── telegram/     # OTP, session management
+│   │       │   └── templates/    # Message templates
+│   │       ├── telegram/     # MTProto client
+│   │       └── utils/        # Helpers, crypto, link parser
+│   │
+│   ├── worker/               # Background Worker
+│   │   └── src/
+│   │       ├── index.ts      # Entry point + graceful shutdown
+│   │       ├── jobs/
+│   │       │   ├── broadcast.worker.ts  # Concurrent broadcast engine
+│   │       │   └── scheduler.worker.ts  # Schedule polling
+│   │       ├── telegram/     # MTProto sender
+│   │       └── utils/        # Logger, sleep, random
+│   │
+│   └── web/                  # Frontend Dashboard (Next.js)
+│       ├── app/
+│       │   ├── login/        # Halaman login
+│       │   └── dashboard/    # Dashboard utama (semua fitur)
+│       ├── lib/              # API fetch helper
+│       └── types/            # TypeScript types
 ```
 
-## Setup Cepat
+## Alur Kerja Broadcast
 
-### 1) Pilih sumber database
-
-Jika full Supabase: skip langkah ini.
-
-Jika local PostgreSQL: jalankan container ini:
-
-```bash
-docker compose up -d
+```
+Dashboard                API                    Database              Worker
+   │                      │                       │                     │
+   │  POST /broadcast/run │                       │                     │
+   │─────────────────────>│                       │                     │
+   │                      │  Create BroadcastRun  │                     │
+   │                      │  status: PENDING      │                     │
+   │                      │──────────────────────>│                     │
+   │                      │                       │                     │
+   │                      │                       │  Poll setiap 3 detik│
+   │                      │                       │<────────────────────│
+   │                      │                       │                     │
+   │                      │                       │  Claim: PENDING→RUNNING
+   │                      │                       │<────────────────────│
+   │                      │                       │                     │
+   │                      │                       │  Kirim ke group 1..N│
+   │                      │                       │  (concurrent runs)  │
+   │                      │                       │<────────────────────│
+   │                      │                       │                     │
+   │  Auto-refresh data   │  GET /broadcast/runs  │                     │
+   │─────────────────────>│──────────────────────>│                     │
+   │  Live monitoring     │                       │                     │
+   │<─────────────────────│                       │                     │
+   │                      │                       │  RUNNING→COMPLETED  │
+   │                      │                       │<────────────────────│
 ```
 
-### 2) Install dependencies
+## Setup
+
+### 1. Clone & Install
 
 ```bash
+git clone <repo-url>
+cd BLAST-TELE
 npm install
 ```
 
-### 3) Siapkan environment
+### 2. Environment Variables
 
-Copy `.env.example` menjadi `.env`, lalu sesuaikan nilai berikut:
-
-- `DATABASE_URL`
-- `DIRECT_URL`
-- `JWT_SECRET`
-- `ADMIN_USERNAME`
-- `ADMIN_PASSWORD`
-- `SESSION_ENCRYPTION_KEY` (minimal 32 karakter)
-- `TELEGRAM_API_ID`
-- `TELEGRAM_API_HASH`
-- `RUN_POLL_INTERVAL_MS` (opsional)
-- `SCHEDULE_POLL_INTERVAL_MS` (opsional)
-
-### Pakai Supabase (Recommended untuk VPS/Cloud)
-
-1. Buat project di Supabase.
-2. Buka menu Database > Connection string.
-3. Ambil 2 URL:
-  - Transaction Pooler (port 6543) untuk `DATABASE_URL`
-  - Direct connection (port 5432) untuk `DIRECT_URL`
-4. Isi `.env`:
-
-```env
-DATABASE_URL=postgresql://postgres.<project-ref>:<db-password>@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require
-DIRECT_URL=postgresql://postgres.<project-ref>:<db-password>@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require
-```
-
-Catatan:
-- `DATABASE_URL` dipakai API/Worker runtime agar koneksi stabil lewat pooler.
-- `DIRECT_URL` dipakai Prisma migrate/db push agar operasi schema lebih aman.
-- Jika host direct `db.<project-ref>.supabase.co` tidak bisa di-resolve dari jaringan lokal, pakai session pooler port 5432 seperti contoh di atas.
-- Redis tidak dibutuhkan.
-
-### 4) Sinkronkan schema database
-
-Untuk Supabase (paling aman dan cepat):
+Copy `.env.example` ke `.env` dan isi:
 
 ```bash
+cp .env.example .env
+```
+
+**Wajib diisi:**
+
+| Variable | Keterangan |
+|----------|------------|
+| `DATABASE_URL` | PostgreSQL connection string (pooler, port 6543 untuk Supabase) |
+| `DIRECT_URL` | PostgreSQL direct connection (port 5432, untuk prisma push) |
+| `SUPABASE_URL` | URL project Supabase (contoh: `https://xxx.supabase.co`) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key dari Supabase dashboard |
+| `NEXT_PUBLIC_SUPABASE_URL` | Sama dengan `SUPABASE_URL` (untuk frontend) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Anon key dari Supabase dashboard (untuk frontend) |
+| `TELEGRAM_API_ID` | Dari https://my.telegram.org |
+| `TELEGRAM_API_HASH` | Dari https://my.telegram.org |
+| `SESSION_ENCRYPTION_KEY` | 32 karakter untuk enkripsi session Telegram |
+
+**Opsional:**
+
+| Variable | Default | Keterangan |
+|----------|---------|------------|
+| `API_PORT` | `4000` | Port API server |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:4000` | URL API untuk frontend |
+| `MIN_SPACING_MS` | `5000` | Minimum delay antar pesan (ms) |
+| `RUN_POLL_INTERVAL_MS` | `3000` | Interval polling worker (ms) |
+| `SCHEDULE_POLL_INTERVAL_MS` | `30000` | Interval polling scheduler (ms) |
+
+### 3. Setup Database
+
+```bash
+# Generate Prisma client
 npm run db:generate
+
+# Push schema ke database
 npm run db:push
 ```
 
-Penting:
-- Jika pakai Supabase, hindari `npm run db:migrate` dari mesin lokal karena bisa hang/timeout saat koneksi pooler.
-- Gunakan `npm run db:push` untuk sinkronisasi schema.
+### 4. Buat User Login di Supabase
 
-Untuk local development dengan migration history:
+1. Buka [Supabase Dashboard](https://supabase.com/dashboard) → pilih project
+2. Buka menu **Authentication** → **Users**
+3. Klik **Add User** → **Create New User**
+4. Isi email dan password → klik **Create User**
+5. Centang **Auto Confirm User** atau konfirmasi manual
 
-```bash
-npm run db:generate
-npm run db:migrate
-```
+User ini yang akan dipakai login ke dashboard BLAST TELE.
 
-### 5) Jalankan seluruh aplikasi
+### 5. Jalankan
+
+**Development:**
 
 ```bash
 npm run dev
 ```
 
-Service default:
+**Production:**
 
-- API: http://localhost:4000
-- Web: http://localhost:3000
+```bash
+npm run build
+npm run start
+```
 
-## Contoh Endpoint API
+**Service:**
+
+| Service | URL | Port |
+|---------|-----|------|
+| Web Dashboard | http://localhost:3000 | 3000 |
+| API Server | http://localhost:4000 | 4000 |
+| Worker | (background process) | - |
+
+### 6. Login & Mulai
+
+1. Buka http://localhost:3000
+2. Login dengan email/password yang dibuat di Supabase (Step 4)
+3. **Session Telegram** — Request OTP → Verify OTP
+4. **Manage Group** — Paste link group → auto-join
+5. **Broadcast** — Pilih mode, isi pesan, jalankan
+
+## API Endpoints
 
 ### Auth
+| Method | Path | Keterangan |
+|--------|------|------------|
+| POST | `/api/auth/login` | Login, return JWT |
+| GET | `/api/auth/me` | Cek user aktif |
 
-- `POST /api/auth/login`
-- `GET /api/auth/me`
-
-### Dashboard
-
-- `GET /api/dashboard/overview`
-
-### Group Manager
-
-- `GET /api/groups`
-- `POST /api/groups`
-- `PATCH /api/groups/:id`
-- `DELETE /api/groups/:id`
-- `POST /api/groups/import/text`
-- `POST /api/groups/import/folder-link`
-- `POST /api/groups/import/file` (multipart form-data, field: `file`)
-
-Contoh payload import text:
-
-```json
-{
-  "content": "@groupA;crypto,jualan\n-1001234567890;promo",
-  "defaultTags": ["campaign-april"]
-}
-```
-
-Contoh payload import folder link:
-
-```json
-{
-  "link": "https://t.me/addlist/HKNL_5Qp3wQxNGRl",
-  "defaultTags": ["folder-april"],
-  "accountId": "optional-account-id"
-}
-```
-
-### Template
-
-- `GET /api/templates`
-- `POST /api/templates`
-- `PATCH /api/templates/:id`
-- `DELETE /api/templates/:id`
-
-Contoh spin text:
-
-```text
-Halo {bro|sis|teman}, cek {promo|diskon|deal} terbaru hari ini.
-```
+### Groups
+| Method | Path | Keterangan |
+|--------|------|------------|
+| GET | `/api/groups` | List groups (search, tag filter) |
+| POST | `/api/groups` | Create group manual |
+| POST | `/api/groups/add-by-link` | **Tambah + auto-join** (link/username/addlist) |
+| PATCH | `/api/groups/:id` | Update group |
+| DELETE | `/api/groups/:id` | Hapus group |
 
 ### Broadcast
-
-- `POST /api/broadcast/run`
-- `GET /api/broadcast/runs`
-- `POST /api/broadcast/runs/:id/pause`
-- `POST /api/broadcast/runs/:id/resume`
-
-Contoh setting mode forward (via endpoint settings):
-
-```json
-{
-  "name": "Forward Channel Promo",
-  "isActive": true,
-  "batchSizeMin": 10,
-  "batchSizeMax": 25,
-  "messageDelayMinSec": 20,
-  "messageDelayMaxSec": 75,
-  "batchDelayMinMin": 20,
-  "batchDelayMaxMin": 120,
-  "sendMode": "FORWARD",
-  "forwardMessageLink": "https://t.me/putrabttstore/70",
-  "randomizeGroups": true,
-  "autoPauseOnLimit": true
-}
-```
-
-### Scheduler
-
-- `GET /api/scheduler`
-- `POST /api/scheduler`
-- `POST /api/scheduler/:id/toggle`
-- `POST /api/scheduler/:id/trigger`
+| Method | Path | Keterangan |
+|--------|------|------------|
+| POST | `/api/broadcast/run` | Buat broadcast baru (label, mode, pesan/link, durasi) |
+| GET | `/api/broadcast/runs` | List semua runs |
+| POST | `/api/broadcast/runs/:id/pause` | Pause broadcast |
+| POST | `/api/broadcast/runs/:id/resume` | Resume broadcast |
 
 ### Telegram Session
+| Method | Path | Keterangan |
+|--------|------|------------|
+| GET | `/api/telegram/accounts` | List akun |
+| POST | `/api/telegram/request-otp` | Kirim OTP |
+| POST | `/api/telegram/verify-otp` | Verifikasi OTP |
 
-- `GET /api/telegram/accounts`
-- `POST /api/telegram/request-otp`
-- `POST /api/telegram/verify-otp`
-- `POST /api/telegram/accounts/:id/disconnect`
-- `GET /api/telegram/accounts/:id/test`
+### Templates, Settings, Scheduler, Logs
+| Method | Path |
+|--------|------|
+| GET/POST/PATCH/DELETE | `/api/templates`, `/api/templates/:id` |
+| GET/POST | `/api/settings` |
+| GET/POST | `/api/scheduler`, `/api/scheduler/:id/toggle`, `/api/scheduler/:id/trigger` |
+| GET | `/api/logs/send`, `/api/logs/activity`, `/api/logs/send/export` |
+| GET | `/api/dashboard/overview` |
 
-### Logs
+## Deployment
 
-- `GET /api/logs/send`
-- `GET /api/logs/activity`
-- `GET /api/logs/send/export`
+Lihat [DEPLOY.md](./DEPLOY.md) untuk panduan lengkap deployment termasuk:
+- Deploy di VPS/Cloud (standard)
+- Deploy di Android (Termux)
+- Split deployment: Web di Vercel + API di Android via tunnel
 
-## Worker Flow (Ringkas)
+## License
 
-- API membuat `BroadcastRun` dengan status `PENDING`.
-- Worker polling Postgres untuk run `PENDING` lalu memproses run dengan batching berdasarkan setting.
-- Worker polling schedule aktif (`INTERVAL`/`CRON`) untuk membuat run otomatis.
-- Antar pesan memakai random delay + minimum spacing (`MIN_SPACING_MS`).
-- Antar batch memakai random delay (menit).
-- Jika error `FLOOD_WAIT_xx`:
-  - Run otomatis `PAUSED`
-  - simpan `pausedUntil`
-  - worker auto-resume saat `pausedUntil` terlewati
-- Jika `PEER_FLOOD`:
-  - Run otomatis `PAUSED`
-  - menunggu tindakan operator (resume manual)
-
-## Security Baseline
-
-- JWT auth untuk endpoint dashboard
-- API rate limiter (`/api`)
-- Input validation dengan Zod
-- Session Telegram disimpan dalam bentuk terenkripsi AES-256-GCM
-- Worker terpisah dari API process
-
-## Catatan Pengembangan Lanjut
-
-- Tambahkan RBAC user multi-role
-- Tambahkan upload media ke object storage (S3/MinIO)
-- Tambahkan retry policy per error code
-- Tambahkan alerting (Telegram internal/admin email)
-- Tambahkan observability (Prometheus + Grafana)
-
-## UI Template Attribution
-
-Frontend dashboard dan halaman login menggunakan aset dari:
-
-- TailAdmin Free Tailwind Dashboard Template: https://github.com/TailAdmin/tailadmin-free-tailwind-dashboard-template
-- License: MIT
-
-Salinan aset UI berada di:
-
-- apps/web/public/tailadmin/style.css
-- apps/web/public/tailadmin/src/images
-- apps/web/public/tailadmin/LICENSE
-#   t e l e - p r o  
- 
+Private project.

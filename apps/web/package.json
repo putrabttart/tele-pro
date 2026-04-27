@@ -8,6 +8,7 @@
     "start": "next start -p 3000"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.105.0",
     "bootstrap": "^5.3.3",
     "bootstrap-icons": "^1.11.3",
     "next": "14.2.21",

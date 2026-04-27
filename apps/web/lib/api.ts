@@ -41,12 +41,29 @@ export const setToken = (token: string) => {
   localStorage.setItem("tbm_token", token);
 };
 
+export const getRefreshToken = () => {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  return localStorage.getItem("tbm_refresh_token") ?? "";
+};
+
+export const setRefreshToken = (token: string) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  localStorage.setItem("tbm_refresh_token", token);
+};
+
 export const clearToken = () => {
   if (typeof window === "undefined") {
     return;
   }
 
   localStorage.removeItem("tbm_token");
+  localStorage.removeItem("tbm_refresh_token");
 };
 
 export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -61,14 +78,45 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const response = await fetch(`${API_URL}${path}`, {
+  let response = await fetch(`${API_URL}${path}`, {
     ...init,
     headers
   });
 
+  // Auto-refresh on 401
   if (response.status === 401) {
-    clearToken();
-    throw new Error("Session expired. Silakan login ulang.");
+    const refreshToken = getRefreshToken();
+    if (refreshToken) {
+      try {
+        const refreshRes = await fetch(`${API_URL}/api/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: refreshToken })
+        });
+
+        if (refreshRes.ok) {
+          const refreshData = await refreshRes.json() as {
+            access_token: string;
+            refresh_token: string;
+          };
+          setToken(refreshData.access_token);
+          setRefreshToken(refreshData.refresh_token);
+
+          // Retry original request with new token
+          headers.set("Authorization", `Bearer ${refreshData.access_token}`);
+          response = await fetch(`${API_URL}${path}`, { ...init, headers });
+        } else {
+          clearToken();
+          throw new Error("Session expired. Silakan login ulang.");
+        }
+      } catch {
+        clearToken();
+        throw new Error("Session expired. Silakan login ulang.");
+      }
+    } else {
+      clearToken();
+      throw new Error("Session expired. Silakan login ulang.");
+    }
   }
 
   if (!response.ok) {
@@ -77,37 +125,6 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
 
   if (response.status === 204) {
     return undefined as T;
-  }
-
-  const raw = await response.text();
-  if (!raw) {
-    return undefined as T;
-  }
-
-  return JSON.parse(raw) as T;
-};
-
-export const apiFetchForm = async <T>(path: string, formData: FormData): Promise<T> => {
-  const headers = new Headers();
-
-  const token = getToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-
-  const response = await fetch(`${API_URL}${path}`, {
-    method: "POST",
-    body: formData,
-    headers
-  });
-
-  if (response.status === 401) {
-    clearToken();
-    throw new Error("Session expired. Silakan login ulang.");
-  }
-
-  if (!response.ok) {
-    throw new Error(await parseApiErrorMessage(response));
   }
 
   const raw = await response.text();

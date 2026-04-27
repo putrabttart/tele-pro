@@ -1,8 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
-import jwt from "jsonwebtoken";
-import { env } from "../config/env";
+import { supabase } from "../config/supabase";
 
-export const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader?.startsWith("Bearer ")) {
@@ -12,10 +11,19 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction) 
   const token = authHeader.replace("Bearer ", "").trim();
 
   try {
-    const decoded = jwt.verify(token, env.JWT_SECRET);
-    req.user = decoded as Request["user"];
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data.user) {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+
+    req.user = {
+      id: data.user.id,
+      email: data.user.email ?? ""
+    };
+
     return next();
-  } catch (_error) {
-    return res.status(401).json({ message: "Invalid token" });
+  } catch {
+    return res.status(401).json({ message: "Authentication failed" });
   }
 };

@@ -2,12 +2,12 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiFetch, setToken } from "../../lib/api";
+import { apiFetch, setToken, setRefreshToken } from "../../lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -17,12 +17,17 @@ export default function LoginPage() {
     setError("");
 
     try {
-      const result = await apiFetch<{ token: string }>("/api/auth/login", {
+      const result = await apiFetch<{
+        access_token: string;
+        refresh_token: string;
+        user: { id: string; email: string };
+      }>("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify({ email, password })
       });
 
-      setToken(result.token);
+      setToken(result.access_token);
+      setRefreshToken(result.refresh_token);
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login gagal");
@@ -56,17 +61,19 @@ export default function LoginPage() {
           <div className="tbm-login-card">
             <form onSubmit={onSubmit}>
               <div className="tbm-field-group">
-                <label htmlFor="username" className="tbm-field-label">
-                  Username<span className="tbm-required">*</span>
+                <label htmlFor="email" className="tbm-field-label">
+                  Email<span className="tbm-required">*</span>
                 </label>
                 <input
-                  id="username"
-                  name="username"
-                  autoComplete="username"
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value)}
-                  placeholder="admin"
+                  id="email"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="admin@example.com"
                   className="tbm-field-input"
+                  required
                 />
               </div>
 
@@ -81,8 +88,9 @@ export default function LoginPage() {
                   autoComplete="current-password"
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  placeholder="Enter your password"
+                  placeholder="Masukkan password"
                   className="tbm-field-input"
+                  required
                 />
               </div>
 
