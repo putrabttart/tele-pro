@@ -31,6 +31,24 @@ class BroadcastService {
       throw new ApiError(400, "No broadcast setting found");
     }
 
+    // ── Check if the requested account is already busy with an active run ──
+    if (payload.accountId) {
+      const busyRun = await prisma.broadcastRun.findFirst({
+        where: {
+          requestedAccountId: payload.accountId,
+          status: { in: [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED] }
+        }
+      });
+
+      if (busyRun) {
+        throw new ApiError(400, `Akun ini sedang digunakan oleh broadcast "${busyRun.label || busyRun.id.slice(0, 8)}" (${busyRun.status}). Tunggu sampai selesai atau hentikan broadcast tersebut.`);
+      }
+    }
+
+    // ── Also check if any auto-selected account would conflict ──
+    // If no specific account requested, check if there's already a run without specific account
+    // that is active (to prevent the worker from picking the same account)
+
     let requestedTemplateIds: string[] = [];
     let effectiveMode = setting.sendMode;
 
@@ -114,6 +132,29 @@ class BroadcastService {
     });
   }
 
+  /** Get list of account IDs that are currently busy (used in active runs) */
+  async getBusyAccountIds() {
+    const activeRuns = await prisma.broadcastRun.findMany({
+      where: {
+        status: { in: [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED] },
+        requestedAccountId: { not: null }
+      },
+      select: {
+        requestedAccountId: true,
+        id: true,
+        label: true,
+        status: true
+      }
+    });
+
+    return activeRuns.map((run) => ({
+      accountId: run.requestedAccountId!,
+      runId: run.id,
+      runLabel: run.label,
+      runStatus: run.status
+    }));
+  }
+
   async pauseRun(runId: string, reason = "Paused by user") {
     return prisma.broadcastRun.update({
       where: { id: runId },
@@ -131,6 +172,26 @@ class BroadcastService {
         status: RunStatus.PENDING,
         reason: null,
         pausedUntil: null
+      }
+    });
+  }
+
+  async cancelRun(runId: string) {
+    const run = await prisma.broadcastRun.findUnique({ where: { id: runId } });
+    if (!run) {
+      throw new ApiError(404, "Run not found");
+    }
+
+    if (run.status === "COMPLETED" || run.status === "FAILED") {
+      throw new ApiError(400, "Cannot cancel a run that is already completed or failed");
+    }
+
+    return prisma.broadcastRun.update({
+      where: { id: runId },
+      data: {
+        status: RunStatus.FAILED,
+        reason: "Dihentikan oleh user",
+        finishedAt: new Date()
       }
     });
   }

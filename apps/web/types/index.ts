@@ -74,11 +74,20 @@ export type RunItem = {
   pendingCount: number;
   totalGroups: number;
   reason: string | null;
+  requestedAccountId: string | null;
   requestedTemplateIds: string[];
   totalDurationHours: number | null;
   intervalMinutes: number | null;
   completedCycles: number;
   createdAt: string;
+  updatedAt: string;
+};
+
+export type BusyAccountInfo = {
+  accountId: string;
+  runId: string;
+  runLabel: string | null;
+  runStatus: "PENDING" | "RUNNING" | "PAUSED";
 };
 
 export type SendLogItem = {
@@ -92,4 +101,19 @@ export type SendLogItem = {
     username: string | null;
     telegramId: string | null;
   };
+  account: {
+    id: string;
+    label: string;
+    phone: string;
+  } | null;
+  run: {
+    id: string;
+    label: string | null;
+    status: "PENDING" | "RUNNING" | "PAUSED" | "COMPLETED" | "FAILED";
+    requestedAccountId: string | null;
+    completedCycles: number;
+    totalDurationHours: number | null;
+    intervalMinutes: number | null;
+    createdAt: string;
+  } | null;
 };

@@ -29,15 +29,29 @@ const markRunFailed = async (runId: string, message: string) => {
   });
 };
 
-const selectAccount = async (accountId?: string) => {
+const selectAccount = async (accountId?: string, currentRunId?: string) => {
   if (accountId) {
     return prisma.telegramAccount.findUnique({ where: { id: accountId } });
   }
 
-  return prisma.telegramAccount.findFirst({
+  // Find account IDs that are currently used by other active runs
+  const busyRuns = await prisma.broadcastRun.findMany({
+    where: {
+      status: { in: [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED] },
+      requestedAccountId: { not: null },
+      ...(currentRunId ? { id: { not: currentRunId } } : {})
+    },
+    select: { requestedAccountId: true }
+  });
+  const busyAccountIds = new Set(busyRuns.map((r) => r.requestedAccountId!));
+
+  // Pick a connected account that is NOT busy with another run
+  const candidates = await prisma.telegramAccount.findMany({
     where: { status: TelegramConnectionStatus.CONNECTED },
     orderBy: { updatedAt: "desc" }
   });
+
+  return candidates.find((acc) => !busyAccountIds.has(acc.id)) ?? null;
 };
 
 const resolveGroupIdentifier = (group: { username: string | null; telegramId: string | null }) => {
@@ -114,6 +128,12 @@ const parseRunPayload = (markers: string[]): ParsedRunPayload | null => {
 };
 
 const processBroadcastRun = async (runId: string) => {
+  // Peek at the current run to check if startedAt already exists (resume case)
+  const existingRun = await prisma.broadcastRun.findUnique({
+    where: { id: runId },
+    select: { startedAt: true }
+  });
+
   const claimed = await prisma.broadcastRun.updateMany({
     where: {
       id: runId,
@@ -122,7 +142,8 @@ const processBroadcastRun = async (runId: string) => {
     data: {
       status: RunStatus.RUNNING,
       reason: null,
-      startedAt: new Date()
+      // Only set startedAt on first start, never overwrite on resume
+      ...(existingRun?.startedAt ? {} : { startedAt: new Date() })
     }
   });
 
@@ -146,7 +167,7 @@ const processBroadcastRun = async (runId: string) => {
     return;
   }
 
-  const account = await selectAccount(run.requestedAccountId ?? undefined);
+  const account = await selectAccount(run.requestedAccountId ?? undefined, run.id);
   if (!account?.encryptedSession) {
     await markRunFailed(run.id, "No connected Telegram account/session");
     await logActivity("worker", "Run failed due to missing account", "ERROR", { runId: run.id });
@@ -185,9 +206,16 @@ const processBroadcastRun = async (runId: string) => {
   }
 
   const hasBatchInterval = run.totalDurationHours && run.intervalMinutes;
-  const broadcastStartTime = Date.now();
+
+  // Use the original startedAt from DB so resume doesn't reset the clock
+  const broadcastStartTime = run.startedAt ? run.startedAt.getTime() : Date.now();
   const totalDurationMs = hasBatchInterval ? run.totalDurationHours! * 60 * 60 * 1000 : 0;
   const intervalMs = hasBatchInterval ? run.intervalMinutes! * 60 * 1000 : 0;
+
+  // Also enforce a hard cap: max cycles = floor(totalDurationHours * 60 / intervalMinutes)
+  const maxCycles = hasBatchInterval
+    ? Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!)
+    : Infinity;
 
   let sentCount = 0;
   let failedCount = 0;
@@ -391,6 +419,16 @@ const processBroadcastRun = async (runId: string) => {
     });
 
     while (true) {
+      // Hard cap: never exceed max cycles regardless of timing
+      if (completedCycles >= maxCycles) {
+        await logActivity("worker", "Batch interval max cycles reached", "INFO", {
+          runId: run.id,
+          completedCycles,
+          maxCycles
+        });
+        break;
+      }
+
       const elapsed = Date.now() - broadcastStartTime;
       if (elapsed >= totalDurationMs) {
         await logActivity("worker", "Batch interval duration expired", "INFO", {
@@ -402,8 +440,8 @@ const processBroadcastRun = async (runId: string) => {
 
       // Check if run is still running (not paused/cancelled externally)
       const currentRun = await prisma.broadcastRun.findUnique({ where: { id: run.id } });
-      if (!currentRun || currentRun.status === RunStatus.PAUSED) {
-        await logActivity("worker", "Batch interval run paused externally", "WARN", { runId: run.id });
+      if (!currentRun || currentRun.status === RunStatus.PAUSED || currentRun.status === RunStatus.FAILED) {
+        await logActivity("worker", "Batch interval run stopped externally", "WARN", { runId: run.id });
         return;
       }
 
@@ -414,21 +452,47 @@ const processBroadcastRun = async (runId: string) => {
 
       completedCycles += 1;
 
+      // Check if this was the last cycle (hard cap)
+      const isLastCycle = completedCycles >= maxCycles;
+
+      if (isLastCycle) {
+        await prisma.broadcastRun.update({
+          where: { id: run.id },
+          data: {
+            completedCycles,
+            sentCount,
+            failedCount,
+            reason: `Semua ${completedCycles} siklus selesai.`
+          }
+        });
+
+        await logActivity("worker", `All ${completedCycles}/${maxCycles} cycles completed`, "INFO", {
+          runId: run.id,
+          sentCount,
+          failedCount,
+          completedCycles,
+          maxCycles
+        });
+
+        break;
+      }
+
       await prisma.broadcastRun.update({
         where: { id: run.id },
         data: {
           completedCycles,
           sentCount,
           failedCount,
-          reason: `Cycle ${completedCycles} completed. Waiting ${run.intervalMinutes} min for next cycle...`
+          reason: `Cycle ${completedCycles}/${maxCycles} completed. Waiting ${run.intervalMinutes} min for next cycle...`
         }
       });
 
-      await logActivity("worker", `Cycle ${completedCycles} completed`, "INFO", {
+      await logActivity("worker", `Cycle ${completedCycles}/${maxCycles} completed`, "INFO", {
         runId: run.id,
         sentCount,
         failedCount,
-        completedCycles
+        completedCycles,
+        maxCycles
       });
 
       // Check if duration will expire before next interval
@@ -441,8 +505,27 @@ const processBroadcastRun = async (runId: string) => {
         break;
       }
 
-      // Wait for the interval before next cycle
-      await sleep(intervalMs);
+      // Wait for the interval before next cycle, checking for pause/cancel every 10s
+      const intervalCheckMs = 10_000;
+      let waitedMs = 0;
+      let aborted = false;
+      while (waitedMs < intervalMs) {
+        const sleepChunk = Math.min(intervalCheckMs, intervalMs - waitedMs);
+        await sleep(sleepChunk);
+        waitedMs += sleepChunk;
+
+        // Check if run was paused or cancelled (status changed to FAILED) during wait
+        const checkRun = await prisma.broadcastRun.findUnique({ where: { id: run.id } });
+        if (!checkRun || checkRun.status === RunStatus.PAUSED || checkRun.status === RunStatus.FAILED) {
+          aborted = true;
+          break;
+        }
+      }
+
+      if (aborted) {
+        await logActivity("worker", "Batch interval run aborted during wait", "WARN", { runId: run.id });
+        return;
+      }
     }
   } else {
     // ── Single Run Mode (legacy) ──

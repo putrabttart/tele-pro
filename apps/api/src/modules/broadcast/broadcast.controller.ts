@@ -12,6 +12,11 @@ class BroadcastController {
     res.json(data);
   }
 
+  async busyAccounts(_req: Request, res: Response) {
+    const data = await broadcastService.getBusyAccountIds();
+    res.json(data);
+  }
+
   async pause(req: Request, res: Response) {
     const data = await broadcastService.pauseRun(req.params.id);
     res.json(data);
@@ -19,6 +24,11 @@ class BroadcastController {
 
   async resume(req: Request, res: Response) {
     const data = await broadcastService.resumeRun(req.params.id);
+    res.json(data);
+  }
+
+  async cancel(req: Request, res: Response) {
+    const data = await broadcastService.cancelRun(req.params.id);
     res.json(data);
   }
 }

@@ -6,6 +6,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { useRouter } from "next/navigation";
 import { apiBaseUrl, apiFetch, clearToken, getToken } from "../../lib/api";
 import type {
+  BusyAccountInfo,
   DashboardOverview,
   GroupItem,
   RunItem,
@@ -238,17 +239,62 @@ const parseRunReason = (reason: string | null): ParsedReason => {
     };
   }
 
+  if (lower.includes("semua") && lower.includes("siklus selesai")) {
+    const cycleMatch = reason.match(/(\d+)\s+siklus/i);
+    const cycle = cycleMatch ? cycleMatch[1] : "?";
+    return {
+      title: `Semua ${cycle} Siklus Selesai`,
+      description: `Broadcast batch telah menyelesaikan semua ${cycle} siklus yang dijadwalkan.`,
+      suggestion: "Broadcast selesai sesuai target. Buat broadcast baru jika ingin mengirim lagi.",
+      icon: "bi-check-circle",
+      severity: "info"
+    };
+  }
+
   if (lower.includes("cycle") && lower.includes("completed") && lower.includes("waiting")) {
-    const cycleMatch = reason.match(/cycle\s+(\d+)/i);
+    const cycleMatch = reason.match(/cycle\s+(\d+)(?:\/(\d+))?/i);
     const waitMatch = reason.match(/waiting\s+(\d+)\s*min/i);
     const cycle = cycleMatch ? cycleMatch[1] : "?";
+    const maxCycle = cycleMatch?.[2] ?? null;
     const waitMin = waitMatch ? waitMatch[1] : "?";
     return {
-      title: `Siklus ${cycle} Selesai`,
-      description: `Broadcast siklus ke-${cycle} sudah selesai. Menunggu ${waitMin} menit sebelum siklus berikutnya.`,
-      suggestion: "Ini normal untuk mode batch broadcast. Broadcast akan otomatis lanjut setelah waktu tunggu habis.",
-      icon: "bi-arrow-repeat",
+      title: `Menunggu Siklus Berikutnya`,
+      description: maxCycle
+        ? `Siklus ke-${cycle} dari ${maxCycle} sudah selesai. Menunggu ${waitMin} menit sebelum siklus ke-${Number(cycle) + 1}.`
+        : `Siklus ke-${cycle} sudah selesai. Menunggu ${waitMin} menit sebelum siklus berikutnya.`,
+      suggestion: "Ini normal untuk mode batch broadcast. Broadcast akan otomatis lanjut setelah waktu tunggu habis. Kamu bisa pause jika ingin menunda.",
+      icon: "bi-hourglass-split",
       severity: "info"
+    };
+  }
+
+  if (lower.includes("dihentikan oleh user")) {
+    return {
+      title: "Dihentikan oleh User",
+      description: "Broadcast ini dihentikan secara manual oleh user.",
+      suggestion: "Jika ingin mengirim ulang, buat broadcast baru dari menu Broadcast.",
+      icon: "bi-stop-circle",
+      severity: "warning"
+    };
+  }
+
+  if (lower.includes("auto-recovered") || lower.includes("server restart")) {
+    return {
+      title: "Pemulihan Otomatis",
+      description: reason,
+      suggestion: "Server mengalami restart. Broadcast akan otomatis dilanjutkan dari posisi terakhir.",
+      icon: "bi-arrow-clockwise",
+      severity: "warning"
+    };
+  }
+
+  if (lower.includes("server shutdown")) {
+    return {
+      title: "Server Shutdown",
+      description: "Server sedang shutdown. Broadcast akan otomatis dilanjutkan saat server nyala kembali.",
+      suggestion: "Tidak perlu tindakan. Broadcast akan resume otomatis.",
+      icon: "bi-power",
+      severity: "warning"
     };
   }
 
@@ -607,6 +653,84 @@ const runStatusBadgeClass = (status: RunItem["status"]) => {
   return "badge tbm-status-neutral";
 };
 
+const runStatusLabel = (run: RunItem): { label: string; sublabel: string; icon: string } => {
+  const hasBatch = run.totalDurationHours && run.intervalMinutes;
+  const maxCycles = hasBatch ? Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!) : null;
+
+  if (run.status === "RUNNING") {
+    // Check if it's waiting between cycles (reason contains "Waiting")
+    const isWaiting = run.reason?.toLowerCase().includes("waiting") || run.reason?.toLowerCase().includes("menunggu");
+    if (hasBatch && isWaiting) {
+      return {
+        label: "Menunggu Siklus",
+        sublabel: `Siklus ${run.completedCycles}/${maxCycles} selesai, menunggu ${run.intervalMinutes}m`,
+        icon: "bi-hourglass-split"
+      };
+    }
+
+    return {
+      label: "Sedang Berjalan",
+      sublabel: hasBatch
+        ? `Siklus ${run.completedCycles + 1}/${maxCycles} sedang mengirim ke ${run.pendingCount} group`
+        : `Mengirim ke ${run.pendingCount} group tersisa`,
+      icon: "bi-broadcast"
+    };
+  }
+
+  if (run.status === "PAUSED") {
+    const isFlood = run.reason?.toLowerCase().includes("floodwait");
+    const isPeerFlood = run.reason?.toLowerCase().includes("peerflood");
+    if (isFlood) {
+      return {
+        label: "Terkena Rate Limit",
+        sublabel: "Auto-pause karena FloodWait, akan resume otomatis",
+        icon: "bi-hourglass-split"
+      };
+    }
+    if (isPeerFlood) {
+      return {
+        label: "Terdeteksi Spam",
+        sublabel: "Auto-pause karena PeerFlood, perlu resume manual",
+        icon: "bi-shield-exclamation"
+      };
+    }
+    return {
+      label: "Dijeda",
+      sublabel: "Broadcast dijeda oleh user",
+      icon: "bi-pause-circle"
+    };
+  }
+
+  if (run.status === "PENDING") {
+    return {
+      label: "Menunggu Antrian",
+      sublabel: "Broadcast akan segera diproses oleh worker",
+      icon: "bi-clock"
+    };
+  }
+
+  if (run.status === "COMPLETED") {
+    return {
+      label: "Selesai",
+      sublabel: hasBatch
+        ? `${run.completedCycles} siklus selesai`
+        : `${run.sentCount} pesan terkirim`,
+      icon: "bi-check-circle"
+    };
+  }
+
+  if (run.status === "FAILED") {
+    const isCancelled = run.reason?.toLowerCase().includes("dihentikan");
+    return {
+      label: isCancelled ? "Dihentikan" : "Gagal",
+      sublabel: isCancelled ? "Dihentikan oleh user" : (run.reason ?? "Error tidak diketahui"),
+      icon: isCancelled ? "bi-stop-circle" : "bi-x-circle"
+    };
+  }
+
+  return { label: run.status, sublabel: "", icon: "bi-question-circle" };
+};
+
 function FieldHelp({ children }: { children: React.ReactNode }) {
   return <div className="tbm-form-help">{children}</div>;
 }
@@ -629,13 +753,14 @@ export default function DashboardPage() {
   const [notice, setNotice] = useState("");
   const [activeSection, setActiveSection] = useState<DashboardSectionId>("overview");
   const [logFilter, setLogFilter] = useState<"ALL" | "FAILED" | "SUCCESS">("ALL");
+  const [logRunFilter, setLogRunFilter] = useState<string>("ALL");
   const [logDateFrom, setLogDateFrom] = useState("");
   const [logDateTo, setLogDateTo] = useState("");
   const [groupSearch, setGroupSearch] = useState("");
   const [groupPage, setGroupPage] = useState(0);
   const [groupPerPage, setGroupPerPage] = useState(10);
   const [runHistoryPage, setRunHistoryPage] = useState(0);
-  const [runHistoryPerPage, setRunHistoryPerPage] = useState(10);
+  const [runHistoryPerPage, setRunHistoryPerPage] = useState(5);
   const [sendLogPage, setSendLogPage] = useState(0);
   const [sendLogPerPage, setSendLogPerPage] = useState(10);
   const [topbarSearch, setTopbarSearch] = useState("");
@@ -656,6 +781,7 @@ export default function DashboardPage() {
   const [templates, setTemplates] = useState<TemplateItem[]>([]);
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [sendLogs, setSendLogs] = useState<SendLogItem[]>([]);
+  const [busyAccounts, setBusyAccounts] = useState<BusyAccountInfo[]>([]);
 
   const [groupAddInput, setGroupAddInput] = useState("");
   const [groupAddAccountId, setGroupAddAccountId] = useState("");
@@ -758,8 +884,28 @@ export default function DashboardPage() {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null;
   }, [runs]);
 
+  /** Unique run IDs from send logs for the session filter dropdown */
+  const logRunOptions = useMemo(() => {
+    const runMap = new Map<string, { id: string; label: string; status: string; accountLabel: string }>();
+    for (const log of sendLogs) {
+      if (runMap.has(log.runId)) continue;
+      const accLabel = log.account ? `${log.account.label} (${log.account.phone})` : "Auto";
+      runMap.set(log.runId, {
+        id: log.runId,
+        label: log.run?.label || log.runId.slice(0, 8),
+        status: log.run?.status ?? "?",
+        accountLabel: accLabel
+      });
+    }
+    return Array.from(runMap.values());
+  }, [sendLogs]);
+
   const filteredLogs = useMemo(() => {
     let result = sendLogs;
+
+    if (logRunFilter !== "ALL") {
+      result = result.filter((item) => item.runId === logRunFilter);
+    }
 
     if (logFilter !== "ALL") {
       result = result.filter((item) => item.status === logFilter);
@@ -778,7 +924,7 @@ export default function DashboardPage() {
     }
 
     return result;
-  }, [sendLogs, logFilter, logDateFrom, logDateTo]);
+  }, [sendLogs, logRunFilter, logFilter, logDateFrom, logDateTo]);
 
   // Filtered groups by search
   const filteredGroups = useMemo(() => {
@@ -795,7 +941,7 @@ export default function DashboardPage() {
   // Reset pagination when data or filter changes
   useEffect(() => { setGroupPage(0); }, [filteredGroups.length, groupSearch]);
   useEffect(() => { setRunHistoryPage(0); }, [runs.length]);
-  useEffect(() => { setSendLogPage(0); }, [filteredLogs.length, logFilter, logDateFrom, logDateTo]);
+  useEffect(() => { setSendLogPage(0); }, [filteredLogs.length, logRunFilter, logFilter, logDateFrom, logDateTo]);
 
   // Paginated slices
   const groupTotalPages = Math.max(1, Math.ceil(filteredGroups.length / groupPerPage));
@@ -1053,7 +1199,8 @@ export default function DashboardPage() {
         accountsRes,
         templatesRes,
         runsRes,
-        sendLogsRes
+        sendLogsRes,
+        busyAccountsRes
       ] = await Promise.all([
         apiFetch<DashboardOverview>("/api/dashboard/overview"),
         apiFetch<GroupItem[]>("/api/groups"),
@@ -1062,7 +1209,8 @@ export default function DashboardPage() {
         apiFetch<TelegramAccount[]>("/api/telegram/accounts"),
         apiFetch<TemplateItem[]>("/api/templates"),
         apiFetch<RunItem[]>("/api/broadcast/runs"),
-        apiFetch<SendLogItem[]>("/api/logs/send")
+        apiFetch<SendLogItem[]>("/api/logs/send"),
+        apiFetch<BusyAccountInfo[]>("/api/broadcast/busy-accounts")
       ]);
 
       setOverview(overviewRes);
@@ -1073,6 +1221,7 @@ export default function DashboardPage() {
       setTemplates(templatesRes);
       setRuns(runsRes);
       setSendLogs(sendLogsRes.slice(0, 120));
+      setBusyAccounts(busyAccountsRes);
       setLastRefreshedAt(new Date());
     } catch (err) {
       if (!silent) {
@@ -1420,7 +1569,12 @@ export default function DashboardPage() {
     });
   };
 
-  const handleRunAction = async (id: string, action: "pause" | "resume") => {
+  const handleRunAction = async (id: string, action: "pause" | "resume" | "cancel") => {
+    if (action === "cancel") {
+      const confirmed = window.confirm("Yakin ingin menghentikan broadcast ini? Broadcast yang sudah dihentikan tidak bisa dilanjutkan.");
+      if (!confirmed) return;
+    }
+
     await withBusyAction(`run-${action}-${id}`, async () => {
       await apiFetch(`/api/broadcast/runs/${id}/${action}`, {
         method: "POST"
@@ -2386,10 +2540,22 @@ export default function DashboardPage() {
                   onChange={(e) => setRunForm((prev) => ({ ...prev, accountId: e.target.value }))}
                 >
                   <option value="">Auto pilih connected</option>
-                  {connectedAccounts.map((acc) => (
-                    <option key={acc.id} value={acc.id}>{acc.label} ({acc.phone})</option>
-                  ))}
+                  {connectedAccounts.map((acc) => {
+                    const busyInfo = busyAccounts.find((b) => b.accountId === acc.id);
+                    const isBusyAcc = Boolean(busyInfo);
+                    return (
+                      <option key={acc.id} value={acc.id} disabled={isBusyAcc}>
+                        {acc.label} ({acc.phone}){isBusyAcc ? ` - Sedang dipakai: ${busyInfo!.runLabel || busyInfo!.runId.slice(0, 8)} (${busyInfo!.runStatus})` : ""}
+                      </option>
+                    );
+                  })}
                 </select>
+                {busyAccounts.length > 0 ? (
+                  <div className="tbm-form-help text-warning">
+                    <i className="bi bi-exclamation-triangle me-1"></i>
+                    {busyAccounts.length} akun sedang digunakan broadcast aktif dan tidak bisa dipilih.
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -2399,6 +2565,16 @@ export default function DashboardPage() {
                 <div className="small text-secondary">
                   <div><strong>Mode:</strong> {runForm.mode === "DIRECT_TEXT" ? "Direct Message" : "Forward from Link"}</div>
                   <div><strong>Target:</strong> {activeGroupsCount} group aktif</div>
+                  <div>
+                    <strong>Akun:</strong>{" "}
+                    {runForm.accountId
+                      ? (() => {
+                          const selectedAcc = connectedAccounts.find((a) => a.id === runForm.accountId);
+                          return selectedAcc ? `${selectedAcc.label} (${selectedAcc.phone})` : "Dipilih";
+                        })()
+                      : "Auto-select"
+                    }
+                  </div>
                   {runForm.totalDurationHours && runForm.intervalMinutes ? (
                     <>
                       <div><strong>Durasi:</strong> {runForm.totalDurationHours} jam</div>
@@ -2411,6 +2587,14 @@ export default function DashboardPage() {
                 </div>
               </div>
 
+              {/* Warning if selected account is busy */}
+              {runForm.accountId && busyAccounts.find((b) => b.accountId === runForm.accountId) ? (
+                <div className="alert alert-danger small mb-2">
+                  <i className="bi bi-exclamation-triangle me-1"></i>
+                  Akun yang dipilih sedang digunakan broadcast lain. Pilih akun lain atau tunggu broadcast selesai.
+                </div>
+              ) : null}
+
               <button
                 className="btn btn-success mt-2"
                 type="button"
@@ -2420,6 +2604,7 @@ export default function DashboardPage() {
                   || isBusy("broadcast-run")
                   || syncing
                   || (Boolean(runForm.totalDurationHours) !== Boolean(runForm.intervalMinutes))
+                  || Boolean(runForm.accountId && busyAccounts.find((b) => b.accountId === runForm.accountId))
                 }
               >
                 {isBusy("broadcast-run")
@@ -2568,8 +2753,19 @@ export default function DashboardPage() {
     );
   };
 
-  const renderMonitoringSection = () => {
+   const renderMonitoringSection = () => {
     const activeRuns = runs.filter((r) => r.status === "RUNNING" || r.status === "PAUSED" || r.status === "PENDING");
+
+    const getAccountLabel = (accountId: string | null) => {
+      if (!accountId) return null;
+      const acc = accounts.find((a) => a.id === accountId);
+      return acc ? `${acc.label} (${acc.phone})` : accountId.slice(0, 8);
+    };
+
+    const getEstimatedTotalCycles = (run: RunItem) => {
+      if (!run.totalDurationHours || !run.intervalMinutes) return null;
+      return Math.floor((run.totalDurationHours * 60) / run.intervalMinutes);
+    };
 
     return (
       <>
@@ -2580,6 +2776,10 @@ export default function DashboardPage() {
               const info = parseRunMode(run.requestedTemplateIds ?? []);
               const total = run.sentCount + run.failedCount + run.pendingCount;
               const progress = total > 0 ? Math.round((run.sentCount / total) * 100) : 0;
+              const statusInfo = runStatusLabel(run);
+              const accountLabel = getAccountLabel(run.requestedAccountId);
+              const estimatedCyclesTotal = getEstimatedTotalCycles(run);
+              const hasBatch = run.totalDurationHours && run.intervalMinutes;
 
               return (
                 <div className="tbm-monitor-card" key={run.id}>
@@ -2587,39 +2787,82 @@ export default function DashboardPage() {
                     <div>
                       <div className="tbm-monitor-card-label">{run.label || `Run ${run.id.slice(0, 8)}`}</div>
                       <div className="tbm-monitor-card-meta">
-                        <span className={runStatusBadgeClass(run.status)}>{run.status}</span>
+                        <span className={runStatusBadgeClass(run.status)}>
+                          <i className={`${statusInfo.icon} me-1`}></i>
+                          {statusInfo.label}
+                        </span>
                         <span className="tbm-monitor-card-mode">{info.mode}</span>
                       </div>
                     </div>
                     <div className="tbm-monitor-card-actions">
                       {run.status === "RUNNING" ? (
-                        <button className="btn btn-sm btn-outline-warning" type="button" onClick={() => void handleRunAction(run.id, "pause")} disabled={isBusy(`run-pause-${run.id}`) || syncing}>Pause</button>
+                        <>
+                          <button className="btn btn-sm btn-outline-warning" type="button" onClick={() => void handleRunAction(run.id, "pause")} disabled={isBusy(`run-pause-${run.id}`) || syncing} title="Jeda broadcast sementara">
+                            <i className="bi bi-pause-fill me-1"></i>{isBusy(`run-pause-${run.id}`) ? "..." : "Jeda"}
+                          </button>
+                          <button className="btn btn-sm btn-outline-danger" type="button" onClick={() => void handleRunAction(run.id, "cancel")} disabled={isBusy(`run-cancel-${run.id}`) || syncing} title="Hentikan broadcast permanen">
+                            <i className="bi bi-stop-fill me-1"></i>{isBusy(`run-cancel-${run.id}`) ? "..." : "Stop"}
+                          </button>
+                        </>
                       ) : null}
                       {run.status === "PAUSED" ? (
-                        <button className="btn btn-sm btn-outline-success" type="button" onClick={() => void handleRunAction(run.id, "resume")} disabled={isBusy(`run-resume-${run.id}`) || syncing}>Resume</button>
+                        <>
+                          <button className="btn btn-sm btn-outline-success" type="button" onClick={() => void handleRunAction(run.id, "resume")} disabled={isBusy(`run-resume-${run.id}`) || syncing} title="Lanjutkan broadcast">
+                            <i className="bi bi-play-fill me-1"></i>{isBusy(`run-resume-${run.id}`) ? "..." : "Lanjutkan"}
+                          </button>
+                          <button className="btn btn-sm btn-outline-danger" type="button" onClick={() => void handleRunAction(run.id, "cancel")} disabled={isBusy(`run-cancel-${run.id}`) || syncing} title="Hentikan broadcast permanen">
+                            <i className="bi bi-stop-fill me-1"></i>{isBusy(`run-cancel-${run.id}`) ? "..." : "Stop"}
+                          </button>
+                        </>
+                      ) : null}
+                      {run.status === "PENDING" ? (
+                        <button className="btn btn-sm btn-outline-danger" type="button" onClick={() => void handleRunAction(run.id, "cancel")} disabled={isBusy(`run-cancel-${run.id}`) || syncing} title="Batalkan broadcast">
+                          <i className="bi bi-x-circle me-1"></i>{isBusy(`run-cancel-${run.id}`) ? "..." : "Batalkan"}
+                        </button>
                       ) : null}
                     </div>
                   </div>
+
+                  {/* Status description */}
+                  <div className="tbm-monitor-status-detail small">
+                    <i className={`${statusInfo.icon} me-1`}></i>
+                    {statusInfo.sublabel}
+                  </div>
+
+                  {/* Account info */}
+                  {accountLabel ? (
+                    <div className="tbm-monitor-account small">
+                      <i className="bi bi-person-circle me-1"></i>
+                      <span>Akun: <strong>{accountLabel}</strong></span>
+                    </div>
+                  ) : (
+                    <div className="tbm-monitor-account small">
+                      <i className="bi bi-person-circle me-1"></i>
+                      <span>Akun: <em>Auto-select</em></span>
+                    </div>
+                  )}
 
                   <div className="tbm-monitor-card-detail small">{info.detail}</div>
 
                   <div className="tbm-monitor-counters">
                     <div className="tbm-monitor-counter tbm-counter-sent">
                       <span className="tbm-monitor-counter-value">{run.sentCount}</span>
-                      <span className="tbm-monitor-counter-label">Sent</span>
+                      <span className="tbm-monitor-counter-label">Terkirim</span>
                     </div>
                     <div className="tbm-monitor-counter tbm-counter-failed">
                       <span className="tbm-monitor-counter-value">{run.failedCount}</span>
-                      <span className="tbm-monitor-counter-label">Failed</span>
+                      <span className="tbm-monitor-counter-label">Gagal</span>
                     </div>
                     <div className="tbm-monitor-counter tbm-counter-pending">
                       <span className="tbm-monitor-counter-value">{run.pendingCount}</span>
-                      <span className="tbm-monitor-counter-label">Pending</span>
+                      <span className="tbm-monitor-counter-label">Menunggu</span>
                     </div>
-                    {run.totalDurationHours ? (
+                    {hasBatch ? (
                       <div className="tbm-monitor-counter tbm-counter-cycle">
-                        <span className="tbm-monitor-counter-value">{run.completedCycles}</span>
-                        <span className="tbm-monitor-counter-label">Cycles</span>
+                        <span className="tbm-monitor-counter-value">
+                          {run.completedCycles}{estimatedCyclesTotal ? `/${estimatedCyclesTotal}` : ""}
+                        </span>
+                        <span className="tbm-monitor-counter-label">Siklus</span>
                       </div>
                     ) : null}
                   </div>
@@ -2631,8 +2874,25 @@ export default function DashboardPage() {
                     <span className="tbm-monitor-progress-text">{progress}%</span>
                   </div>
 
+                  {/* Batch interval info */}
+                  {hasBatch ? (
+                    <div className="tbm-monitor-batch-info small">
+                      <i className="bi bi-arrow-repeat me-1"></i>
+                      Batch: {run.totalDurationHours}j durasi, setiap {Number(run.intervalMinutes) >= 60 ? `${Number(run.intervalMinutes) / 60}j` : `${run.intervalMinutes}m`}
+                    </div>
+                  ) : null}
+
                   {run.reason ? (
-                    <div className="tbm-monitor-reason small">{formatReasonShort(run.reason)}</div>
+                    <div className={`tbm-monitor-reason small ${
+                      run.reason.toLowerCase().includes("waiting") || run.reason.toLowerCase().includes("menunggu")
+                        ? "tbm-reason-waiting"
+                        : run.reason.toLowerCase().includes("flood") || run.reason.toLowerCase().includes("peer")
+                          ? "tbm-reason-warning"
+                          : ""
+                    }`}>
+                      <i className={`${parseRunReason(run.reason).icon} me-1`}></i>
+                      {formatReasonShort(run.reason)}
+                    </div>
                   ) : null}
                 </div>
               );
@@ -2679,10 +2939,10 @@ export default function DashboardPage() {
                 <tr>
                   <th>Nama</th>
                   <th>Mode / Pesan</th>
+                  <th>Akun</th>
                   <th>Status</th>
                   <th>Sent</th>
                   <th>Failed</th>
-                  <th>Pending</th>
                   <th>Info</th>
                   <th>Action</th>
                 </tr>
@@ -2692,8 +2952,11 @@ export default function DashboardPage() {
                   paginatedRuns.map((run) => {
                     const pauseKey = `run-pause-${run.id}`;
                     const resumeKey = `run-resume-${run.id}`;
+                    const cancelKey = `run-cancel-${run.id}`;
                     const hasBatch = run.totalDurationHours && run.intervalMinutes;
                     const info = parseRunMode(run.requestedTemplateIds ?? []);
+                    const statusInfo = runStatusLabel(run);
+                    const accountLabel = getAccountLabel(run.requestedAccountId);
 
                     return (
                       <tr key={run.id}>
@@ -2705,13 +2968,27 @@ export default function DashboardPage() {
                           <span className="badge tbm-status-neutral me-1">{info.mode}</span>
                           <span className="small text-secondary" style={{ maxWidth: 180, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "middle" }} title={info.detail}>{info.detail}</span>
                         </td>
-                        <td><span className={runStatusBadgeClass(run.status)}>{run.status}</span></td>
+                        <td>
+                          <span className="small" title={accountLabel ?? "Auto-select"}>
+                            <i className="bi bi-person-circle me-1"></i>
+                            {accountLabel ? accountLabel : <em className="text-secondary">Auto</em>}
+                          </span>
+                        </td>
+                        <td>
+                          <span className={runStatusBadgeClass(run.status)}>
+                            <i className={`${statusInfo.icon} me-1`}></i>
+                            {statusInfo.label}
+                          </span>
+                          {statusInfo.sublabel && ["RUNNING", "PAUSED", "PENDING"].includes(run.status) ? (
+                            <div className="text-secondary" style={{ fontSize: "0.7rem", marginTop: 2 }}>{statusInfo.sublabel}</div>
+                          ) : null}
+                        </td>
                         <td>{run.sentCount}</td>
                         <td>{run.failedCount}</td>
-                        <td>{run.pendingCount}</td>
                         <td>
                           {hasBatch ? (
                             <span className="small">
+                              <i className="bi bi-arrow-repeat me-1"></i>
                               {run.totalDurationHours}j / {run.intervalMinutes}m
                               {run.completedCycles ? ` (${run.completedCycles}x)` : ""}
                             </span>
@@ -2719,23 +2996,43 @@ export default function DashboardPage() {
                             <span className="text-secondary small">1x kirim</span>
                           )}
                           {run.reason ? (
-                            <div className="tbm-reason-detail mt-1" title={run.reason}>{formatReasonShort(run.reason)}</div>
+                            <div className="tbm-reason-detail mt-1" title={run.reason}>
+                              <i className={`${parseRunReason(run.reason).icon} me-1`}></i>
+                              {formatReasonShort(run.reason)}
+                            </div>
                           ) : null}
                         </td>
                         <td>
-                          {run.status === "RUNNING" ? (
-                            <button className="btn btn-sm btn-outline-warning" type="button" onClick={() => void handleRunAction(run.id, "pause")} disabled={isBusy(pauseKey) || syncing}>
-                              {isBusy(pauseKey) ? "..." : "Pause"}
-                            </button>
-                          ) : null}
-                          {run.status === "PAUSED" ? (
-                            <button className="btn btn-sm btn-outline-success" type="button" onClick={() => void handleRunAction(run.id, "resume")} disabled={isBusy(resumeKey) || syncing}>
-                              {isBusy(resumeKey) ? "..." : "Resume"}
-                            </button>
-                          ) : null}
-                          {["PENDING", "COMPLETED", "FAILED"].includes(run.status) ? (
-                            <span className="text-secondary small">-</span>
-                          ) : null}
+                          <div className="d-flex gap-1 flex-wrap">
+                            {run.status === "RUNNING" ? (
+                              <>
+                                <button className="btn btn-sm btn-outline-warning" type="button" onClick={() => void handleRunAction(run.id, "pause")} disabled={isBusy(pauseKey) || syncing} title="Jeda">
+                                  <i className="bi bi-pause-fill"></i>
+                                </button>
+                                <button className="btn btn-sm btn-outline-danger" type="button" onClick={() => void handleRunAction(run.id, "cancel")} disabled={isBusy(cancelKey) || syncing} title="Hentikan">
+                                  <i className="bi bi-stop-fill"></i>
+                                </button>
+                              </>
+                            ) : null}
+                            {run.status === "PAUSED" ? (
+                              <>
+                                <button className="btn btn-sm btn-outline-success" type="button" onClick={() => void handleRunAction(run.id, "resume")} disabled={isBusy(resumeKey) || syncing} title="Lanjutkan">
+                                  <i className="bi bi-play-fill"></i>
+                                </button>
+                                <button className="btn btn-sm btn-outline-danger" type="button" onClick={() => void handleRunAction(run.id, "cancel")} disabled={isBusy(cancelKey) || syncing} title="Hentikan">
+                                  <i className="bi bi-stop-fill"></i>
+                                </button>
+                              </>
+                            ) : null}
+                            {run.status === "PENDING" ? (
+                              <button className="btn btn-sm btn-outline-danger" type="button" onClick={() => void handleRunAction(run.id, "cancel")} disabled={isBusy(cancelKey) || syncing} title="Batalkan">
+                                <i className="bi bi-x-circle"></i>
+                              </button>
+                            ) : null}
+                            {["COMPLETED", "FAILED"].includes(run.status) ? (
+                              <span className="text-secondary small">-</span>
+                            ) : null}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -2761,11 +3058,41 @@ export default function DashboardPage() {
         <div className="tbm-panel">
           <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
             <div>
-              <h5 className="tbm-panel-title mb-0">Send Logs & Error Detail</h5>
-              <p className="tbm-panel-desc mb-0">Detail error per group dengan penjelasan yang mudah dimengerti.</p>
+              <h5 className="tbm-panel-title mb-0">Send Logs per Sesi Broadcast</h5>
+              <p className="tbm-panel-desc mb-0">Pilih sesi broadcast untuk melihat detail log pengiriman dan error per group.</p>
             </div>
             <div className="d-flex align-items-center gap-2 flex-wrap">
-              <span className="tbm-pagination-info">{filteredLogs.length} logs</span>
+              <button
+                className="btn btn-sm btn-outline-dark"
+                type="button"
+                onClick={() => void handleExportLogs()}
+                disabled={isBusy("logs-export") || syncing || filteredLogs.length === 0}
+              >
+                {isBusy("logs-export") ? "Mengekspor..." : "Export CSV"}
+              </button>
+            </div>
+          </div>
+
+          {/* ── Session selector ── */}
+          <div className="tbm-log-session-filter mt-3">
+            <div className="d-flex align-items-center gap-2 flex-wrap">
+              <label className="form-label mb-0 fw-semibold small">Sesi Broadcast:</label>
+              <select
+                className="form-select form-select-sm"
+                style={{ maxWidth: 360 }}
+                value={logRunFilter}
+                onChange={(e) => { setLogRunFilter(e.target.value); setSendLogPage(0); }}
+              >
+                <option value="ALL">Semua Sesi ({sendLogs.length} logs)</option>
+                {logRunOptions.map((opt) => {
+                  const logCount = sendLogs.filter((l) => l.runId === opt.id).length;
+                  return (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label} - {opt.accountLabel} [{opt.status}] ({logCount} logs)
+                    </option>
+                  );
+                })}
+              </select>
               <select
                 className="form-select form-select-sm"
                 style={{ width: 110 }}
@@ -2785,16 +3112,65 @@ export default function DashboardPage() {
                   <option key={n} value={n}>{n} / page</option>
                 ))}
               </select>
-              <button
-                className="btn btn-sm btn-outline-dark"
-                type="button"
-                onClick={() => void handleExportLogs()}
-                disabled={isBusy("logs-export") || syncing || filteredLogs.length === 0}
-              >
-                {isBusy("logs-export") ? "Mengekspor..." : "Export CSV"}
-              </button>
+              <span className="tbm-pagination-info">{filteredLogs.length} logs</span>
             </div>
           </div>
+
+          {/* ── Selected session info card ── */}
+          {logRunFilter !== "ALL" ? (() => {
+            const selectedOpt = logRunOptions.find((o) => o.id === logRunFilter);
+            const selectedRunLogs = sendLogs.filter((l) => l.runId === logRunFilter);
+            const successCount = selectedRunLogs.filter((l) => l.status === "SUCCESS").length;
+            const failedCount = selectedRunLogs.filter((l) => l.status === "FAILED").length;
+            const firstLog = selectedRunLogs[selectedRunLogs.length - 1];
+            const runData = firstLog?.run;
+
+            return (
+              <div className="tbm-log-session-card mt-3">
+                <div className="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                  <div>
+                    <div className="fw-semibold">{selectedOpt?.label ?? logRunFilter.slice(0, 8)}</div>
+                    <div className="small text-secondary mt-1">
+                      <i className="bi bi-person-circle me-1"></i>
+                      Akun: <strong>{selectedOpt?.accountLabel ?? "Auto"}</strong>
+                    </div>
+                    {runData ? (
+                      <div className="small text-secondary">
+                        <i className="bi bi-calendar3 me-1"></i>
+                        Dibuat: {new Date(runData.createdAt).toLocaleString("id-ID")}
+                        {runData.totalDurationHours && runData.intervalMinutes ? (
+                          <span className="ms-2">
+                            <i className="bi bi-arrow-repeat me-1"></i>
+                            {runData.totalDurationHours}j / {runData.intervalMinutes}m
+                            (siklus {runData.completedCycles}/{Math.floor((runData.totalDurationHours * 60) / runData.intervalMinutes)})
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="d-flex gap-3">
+                    <div className="text-center">
+                      <div className="fw-bold text-success">{successCount}</div>
+                      <div className="small text-secondary">Terkirim</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="fw-bold text-danger">{failedCount}</div>
+                      <div className="small text-secondary">Gagal</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="fw-bold">{selectedRunLogs.length}</div>
+                      <div className="small text-secondary">Total</div>
+                    </div>
+                  </div>
+                </div>
+                {selectedOpt ? (
+                  <div className="mt-2">
+                    <span className={runStatusBadgeClass(selectedOpt.status as RunItem["status"])}>{selectedOpt.status}</span>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })() : null}
 
           <div className="tbm-date-filter mt-3">
             <div className="tbm-date-filter-row">
@@ -2828,7 +3204,9 @@ export default function DashboardPage() {
             <table className="table table-sm table-bordered align-middle">
               <thead className="table-light">
                 <tr>
+                  {logRunFilter === "ALL" ? <th>Sesi</th> : null}
                   <th>Group</th>
+                  <th>Akun</th>
                   <th>Status</th>
                   <th>Error</th>
                   <th>Penjelasan</th>
@@ -2842,7 +3220,25 @@ export default function DashboardPage() {
 
                     return (
                       <tr key={log.id}>
+                        {logRunFilter === "ALL" ? (
+                          <td>
+                            <button
+                              type="button"
+                              className="btn btn-link btn-sm p-0 text-start"
+                              style={{ fontSize: "0.8rem", textDecoration: "none" }}
+                              onClick={() => { setLogRunFilter(log.runId); setSendLogPage(0); }}
+                              title={`Filter ke sesi: ${log.run?.label || log.runId.slice(0, 8)}`}
+                            >
+                              {log.run?.label || log.runId.slice(0, 8)}
+                            </button>
+                          </td>
+                        ) : null}
                         <td>{log.group.username ? `@${log.group.username}` : log.group.telegramId ?? "-"}</td>
+                        <td>
+                          <span className="small">
+                            {log.account ? `${log.account.label}` : <span className="text-secondary">-</span>}
+                          </span>
+                        </td>
                         <td><span className={statusBadgeClass(log.status)}>{log.status}</span></td>
                         <td>
                           {parsed ? (
@@ -2865,7 +3261,7 @@ export default function DashboardPage() {
                     );
                   })
                 ) : (
-                  <TableEmptyRow colSpan={5} message="Belum ada data log untuk filter yang dipilih." />
+                  <TableEmptyRow colSpan={logRunFilter === "ALL" ? 7 : 6} message="Belum ada data log untuk filter yang dipilih." />
                 )}
               </tbody>
             </table>
