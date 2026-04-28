@@ -2440,14 +2440,23 @@ export default function DashboardPage() {
               </div>
 
               <div className="d-flex flex-wrap gap-2 mt-2">
-                {[1, 6, 12, 24, 48].map((h) => (
+                {([
+                  { h: 1, label: "1 jam" },
+                  { h: 6, label: "6 jam" },
+                  { h: 12, label: "12 jam" },
+                  { h: 24, label: "1 hari" },
+                  { h: 72, label: "3 hari" },
+                  { h: 168, label: "7 hari" },
+                  { h: 336, label: "2 minggu" },
+                  { h: 720, label: "1 bulan" },
+                ]).map((item) => (
                   <button
-                    key={h}
+                    key={item.h}
                     type="button"
-                    className={`btn btn-sm ${runForm.totalDurationHours === String(h) ? "btn-primary" : "btn-outline-secondary"}`}
-                    onClick={() => setRunForm((prev) => ({ ...prev, totalDurationHours: String(h) }))}
+                    className={`btn btn-sm ${runForm.totalDurationHours === String(item.h) ? "btn-primary" : "btn-outline-secondary"}`}
+                    onClick={() => setRunForm((prev) => ({ ...prev, totalDurationHours: String(item.h) }))}
                   >
-                    {h} jam
+                    {item.label}
                   </button>
                 ))}
               </div>
