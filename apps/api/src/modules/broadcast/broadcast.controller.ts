@@ -12,6 +12,11 @@ class BroadcastController {
     res.json(data);
   }
 
+  async getRunDetail(req: Request, res: Response) {
+    const data = await broadcastService.getRunDetail(req.params.id);
+    res.json(data);
+  }
+
   async busyAccounts(_req: Request, res: Response) {
     const data = await broadcastService.getBusyAccountIds();
     res.json(data);

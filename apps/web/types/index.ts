@@ -65,6 +65,18 @@ export type TelegramAccount = {
   lastLoginAt: string | null;
 };
 
+export type CycleDetail = {
+  cycleNumber: number;
+  status: "completed" | "paused" | "failed" | "cancelled";
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+  failReason?: string;
+};
+
 export type RunItem = {
   id: string;
   label: string | null;
@@ -79,6 +91,14 @@ export type RunItem = {
   totalDurationHours: number | null;
   intervalMinutes: number | null;
   completedCycles: number;
+  currentCycleNumber: number;
+  currentCycleStartedAt: string | null;
+  lastCycleFinishedAt: string | null;
+  nextCycleAt: string | null;
+  consecutiveFailCount: number;
+  cycleDetails: CycleDetail[] | null;
+  startedAt: string | null;
+  finishedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -93,6 +113,7 @@ export type BusyAccountInfo = {
 export type SendLogItem = {
   id: string;
   runId: string;
+  cycleNumber: number;
   status: "SUCCESS" | "FAILED" | "PENDING" | "SKIPPED";
   errorCode: string | null;
   errorMessage: string | null;
@@ -100,6 +121,7 @@ export type SendLogItem = {
   group: {
     username: string | null;
     telegramId: string | null;
+    title: string | null;
   };
   account: {
     id: string;
@@ -117,3 +139,41 @@ export type SendLogItem = {
     createdAt: string;
   } | null;
 };
+
+export type CycleSummaryResponse = {
+  run: {
+    id: string;
+    status: string;
+    completedCycles: number;
+    currentCycleNumber: number;
+    totalDurationHours: number | null;
+    intervalMinutes: number | null;
+    startedAt: string | null;
+    finishedAt: string | null;
+    sentCount: number;
+    failedCount: number;
+    totalGroups: number;
+    currentCycleStartedAt: string | null;
+    lastCycleFinishedAt: string | null;
+    nextCycleAt: string | null;
+    consecutiveFailCount: number;
+    reason: string | null;
+    cycleDetails: CycleDetail[] | null;
+  };
+  cycles: Array<{
+    cycleNumber: number;
+    total: number;
+    success: number;
+    failed: number;
+    firstSent: string | null;
+    lastSent: string | null;
+    durationMs: number | null;
+  }>;
+};
+
+export type FailureAnalysis = Array<{
+  errorCode: string | null;
+  errorMessage: string | null;
+  cycleNumber: number;
+  count: number;
+}>;

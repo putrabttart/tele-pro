@@ -106,7 +106,10 @@ class BroadcastService {
         status: RunStatus.PENDING,
         totalDurationHours: payload.totalDurationHours ?? null,
         intervalMinutes: payload.intervalMinutes ?? null,
-        completedCycles: 0
+        completedCycles: 0,
+        currentCycleNumber: 0,
+        consecutiveFailCount: 0,
+        cycleDetails: []
       }
     });
 
@@ -130,6 +133,44 @@ class BroadcastService {
       },
       take: 100
     });
+  }
+
+  async getRunDetail(runId: string) {
+    const run = await prisma.broadcastRun.findUnique({
+      where: { id: runId },
+      include: {
+        schedule: true,
+        setting: true
+      }
+    });
+
+    if (!run) {
+      throw new ApiError(404, "Run not found");
+    }
+
+    // Get per-cycle counts
+    const cycleCounts = await prisma.sendLog.groupBy({
+      by: ["cycleNumber", "status"],
+      where: { runId },
+      _count: true
+    });
+
+    // Build cycle summary map
+    const cycleMap = new Map<number, { success: number; failed: number; total: number }>();
+    for (const row of cycleCounts) {
+      const existing = cycleMap.get(row.cycleNumber) ?? { success: 0, failed: 0, total: 0 };
+      if (row.status === "SUCCESS") existing.success = row._count;
+      else if (row.status === "FAILED") existing.failed = row._count;
+      existing.total += row._count;
+      cycleMap.set(row.cycleNumber, existing);
+    }
+
+    return {
+      ...run,
+      cycleSummary: Array.from(cycleMap.entries())
+        .sort(([a], [b]) => a - b)
+        .map(([cycleNumber, stats]) => ({ cycleNumber, ...stats }))
+    };
   }
 
   /** Get list of account IDs that are currently busy (used in active runs) */

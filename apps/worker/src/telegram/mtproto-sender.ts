@@ -4,6 +4,9 @@ import { Logger, LogLevel } from "telegram/extensions/Logger";
 import { env } from "../config/env";
 import { decryptText } from "../utils/crypto";
 
+const CLIENT_CONNECT_TIMEOUT_MS = 30_000; // 30s timeout for connection
+const SEND_TIMEOUT_MS = 60_000; // 60s timeout for send operation
+
 const createClient = async (encryptedSession: string) => {
   if (!env.TELEGRAM_API_ID || !env.TELEGRAM_API_HASH) {
     throw new Error("TELEGRAM_API_ID and TELEGRAM_API_HASH are required");
@@ -11,8 +14,9 @@ const createClient = async (encryptedSession: string) => {
 
   const session = decryptText(encryptedSession);
   const client = new TelegramClient(new StringSession(session), env.TELEGRAM_API_ID, env.TELEGRAM_API_HASH, {
-    connectionRetries: 2,
-    autoReconnect: false,
+    connectionRetries: 3,
+    autoReconnect: true,
+    timeout: CLIENT_CONNECT_TIMEOUT_MS,
     baseLogger: new Logger(LogLevel.NONE)
   });
 
@@ -80,7 +84,18 @@ export class MtprotoSender {
     forwardSourceChatId?: string | null;
     forwardMessageId?: number | null;
   }): Promise<SendResult> {
-    const client = await createClient(input.encryptedSession);
+    let client: TelegramClient | null = null;
+
+    try {
+      client = await createClient(input.encryptedSession);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown connection error";
+      return {
+        ok: false,
+        errorCode: "CONNECTION_FAILED",
+        errorMessage: `Gagal konek ke Telegram: ${message}`
+      };
+    }
 
     try {
       if (input.sendMode === "FORWARD" && input.forwardSourceChatId) {
@@ -91,7 +106,7 @@ export class MtprotoSender {
           return {
             ok: false,
             errorCode: "FORWARD_MESSAGE_NOT_FOUND",
-            errorMessage: "No message found in forward source"
+            errorMessage: "Pesan tidak ditemukan di source forward"
           };
         }
 
@@ -110,11 +125,13 @@ export class MtprotoSender {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown Telegram error";
 
+      // ── Categorize Telegram errors ──
+
       if (/PEER_FLOOD/i.test(message)) {
         return {
           ok: false,
           errorCode: "PEER_FLOOD",
-          errorMessage: message
+          errorMessage: "Akun terkena limit spam Telegram (PEER_FLOOD)"
         };
       }
 
@@ -123,8 +140,65 @@ export class MtprotoSender {
         return {
           ok: false,
           errorCode: "FLOOD_WAIT",
-          errorMessage: message,
+          errorMessage: `Rate limit Telegram: tunggu ${floodWait} detik`,
           floodWaitSeconds: floodWait
+        };
+      }
+
+      if (/CHAT_WRITE_FORBIDDEN/i.test(message)) {
+        return {
+          ok: false,
+          errorCode: "CHAT_WRITE_FORBIDDEN",
+          errorMessage: "Akun tidak punya izin menulis di grup ini"
+        };
+      }
+
+      if (/CHANNEL_PRIVATE/i.test(message)) {
+        return {
+          ok: false,
+          errorCode: "CHANNEL_PRIVATE",
+          errorMessage: "Grup/channel bersifat private, akun belum bergabung"
+        };
+      }
+
+      if (/USER_BANNED_IN_CHANNEL/i.test(message)) {
+        return {
+          ok: false,
+          errorCode: "USER_BANNED",
+          errorMessage: "Akun dibanned dari grup ini"
+        };
+      }
+
+      if (/CHAT_ADMIN_REQUIRED/i.test(message)) {
+        return {
+          ok: false,
+          errorCode: "ADMIN_REQUIRED",
+          errorMessage: "Perlu hak admin untuk mengirim di grup ini"
+        };
+      }
+
+      if (/SLOWMODE_WAIT_(\d+)/i.test(message)) {
+        const match = message.match(/SLOWMODE_WAIT_(\d+)/i);
+        return {
+          ok: false,
+          errorCode: "SLOWMODE_WAIT",
+          errorMessage: `Grup dalam mode slow: tunggu ${match?.[1] ?? "?"} detik`
+        };
+      }
+
+      if (/AUTH_KEY_UNREGISTERED|SESSION_EXPIRED|SESSION_REVOKED/i.test(message)) {
+        return {
+          ok: false,
+          errorCode: "SESSION_INVALID",
+          errorMessage: "Sesi Telegram sudah expired/revoked, perlu login ulang"
+        };
+      }
+
+      if (/TIMEOUT|ECONNREFUSED|ENOTFOUND|NETWORK/i.test(message)) {
+        return {
+          ok: false,
+          errorCode: "NETWORK_ERROR",
+          errorMessage: `Masalah jaringan: ${message}`
         };
       }
 
@@ -134,7 +208,11 @@ export class MtprotoSender {
         errorMessage: message
       };
     } finally {
-      await client.disconnect();
+      try {
+        if (client) await client.disconnect();
+      } catch {
+        // Ignore disconnect errors
+      }
     }
   }
 }

@@ -133,28 +133,36 @@ model BroadcastRun {
   totalDurationHours Int?
   intervalMinutes    Int?
   completedCycles    Int       @default(0)
+  currentCycleStartedAt DateTime?
+  currentCycleNumber    Int       @default(0)
+  lastCycleFinishedAt   DateTime?
+  nextCycleAt           DateTime?
+  consecutiveFailCount  Int       @default(0)
+  cycleDetails          Json?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   logs        SendLog[]
 }
 
 model SendLog {
-  id          String          @id @default(cuid())
-  runId       String
-  run         BroadcastRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
-  groupId     String
-  group       Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  accountId   String?
-  account     TelegramAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  templateId  String?
-  template    MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  status      SendStatus
-  errorCode   String?
+  id           String          @id @default(cuid())
+  runId        String
+  run          BroadcastRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  groupId      String
+  group        Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  accountId    String?
+  account      TelegramAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  templateId   String?
+  template     MessageTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  cycleNumber  Int             @default(1)
+  status       SendStatus
+  errorCode    String?
   errorMessage String?
-  timestamp   DateTime        @default(now())
+  timestamp    DateTime        @default(now())
 
   @@index([status])
   @@index([timestamp])
+  @@index([runId, cycleNumber])
 }
 
 model ActivityLog {
