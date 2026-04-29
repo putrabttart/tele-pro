@@ -298,12 +298,58 @@ const parseRunReason = (reason: string | null): ParsedReason => {
     };
   }
 
+  // Progress messages from the worker (not errors)
+  if (lower.includes("siklus") && (lower.includes("sedang berjalan") || lower.includes("mengirim ke"))) {
+    const cycleMatch = reason.match(/siklus\s+(\d+)/i);
+    const cycle = cycleMatch ? cycleMatch[1] : "?";
+    return {
+      title: `Siklus ${cycle} Sedang Berjalan`,
+      description: reason,
+      suggestion: "Broadcast sedang aktif mengirim pesan ke semua group.",
+      icon: "bi-broadcast",
+      severity: "info"
+    };
+  }
+
+  if (lower.includes("siklus") && lower.includes("selesai") && lower.includes("menunggu")) {
+    const cycleMatch = reason.match(/siklus\s+(\d+)\/(\d+)/i);
+    const cycle = cycleMatch ? cycleMatch[1] : "?";
+    const maxCycle = cycleMatch ? cycleMatch[2] : "?";
+    return {
+      title: `Menunggu Siklus Berikutnya`,
+      description: reason,
+      suggestion: `Siklus ${cycle}/${maxCycle} selesai. Broadcast akan otomatis lanjut sesuai interval.`,
+      icon: "bi-hourglass-split",
+      severity: "info"
+    };
+  }
+
+  if (lower.includes("selesai:") || (lower.includes("siklus") && lower.includes("terkirim"))) {
+    return {
+      title: "Broadcast Selesai",
+      description: reason,
+      suggestion: "Broadcast telah selesai. Buat broadcast baru jika ingin mengirim lagi.",
+      icon: "bi-check-circle",
+      severity: "info"
+    };
+  }
+
+  if (lower.includes("di-reset") || lower.includes("dimulai ulang")) {
+    return {
+      title: "Broadcast Dimulai Ulang",
+      description: reason,
+      suggestion: "Data siklus telah di-reset. Broadcast akan berjalan dari awal.",
+      icon: "bi-arrow-clockwise",
+      severity: "info"
+    };
+  }
+
   return {
-    title: "Broadcast Gagal",
+    title: reason,
     description: reason,
-    suggestion: "Periksa detail error di atas dan coba perbaiki masalahnya sebelum menjalankan broadcast ulang.",
-    icon: "bi-exclamation-triangle",
-    severity: "warning"
+    suggestion: "Lihat detail untuk informasi lebih lanjut.",
+    icon: "bi-info-circle",
+    severity: "info"
   };
 };
 
