@@ -96,6 +96,17 @@ class BroadcastService {
       throw new ApiError(400, "Active setting FORWARD mode requires forward source configuration");
     }
 
+    // Validasi: interval terlalu kecil bisa menyebabkan terlalu banyak siklus
+    if (payload.totalDurationHours && payload.intervalMinutes) {
+      const estimatedCycles = Math.floor((payload.totalDurationHours * 60) / payload.intervalMinutes);
+      if (estimatedCycles > 500) {
+        throw new ApiError(400, `Terlalu banyak siklus (${estimatedCycles}x). Periksa interval — nilai dalam MENIT (contoh: 1 jam = 60 menit). Maksimal 500 siklus.`);
+      }
+      if (payload.intervalMinutes < 5) {
+        throw new ApiError(400, `Interval terlalu kecil (${payload.intervalMinutes} menit). Minimum interval adalah 5 menit untuk menghindari spam.`);
+      }
+    }
+
     const run = await prisma.broadcastRun.create({
       data: {
         label: payload.label?.trim() || null,

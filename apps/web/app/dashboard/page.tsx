@@ -655,7 +655,8 @@ const runStatusBadgeClass = (status: RunItem["status"]) => {
 
 const runStatusLabel = (run: RunItem): { label: string; sublabel: string; icon: string } => {
   const hasBatch = run.totalDurationHours && run.intervalMinutes;
-  const maxCycles = hasBatch ? Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!) : null;
+  // FIX: Same formula as backend, capped at 500 for safety
+  const maxCycles = hasBatch ? Math.min(Math.max(1, Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!)), 500) : null;
 
   if (run.status === "RUNNING") {
     // Check if it's waiting between cycles (reason contains "Waiting")
@@ -2322,7 +2323,8 @@ export default function DashboardPage() {
     const dur = Number(runForm.totalDurationHours);
     const intv = Number(runForm.intervalMinutes);
     if (!dur || !intv || dur <= 0 || intv <= 0) return null;
-    return Math.floor((dur * 60) / intv);
+    // FIX: Same formula as backend, capped at 500 for safety
+    return Math.min(Math.max(1, Math.floor((dur * 60) / intv)), 500);
   }, [runForm.totalDurationHours, runForm.intervalMinutes]);
 
   const renderBroadcastSection = () => {
@@ -2493,10 +2495,15 @@ export default function DashboardPage() {
           </div>
 
           {estimatedCycles !== null && estimatedCycles > 0 ? (
-            <div className="alert alert-info mt-3 mb-0">
-              <i className="bi bi-info-circle me-1"></i>
+            <div className={`alert mt-3 mb-0 ${estimatedCycles > 50 ? "alert-warning" : "alert-info"}`}>
+              <i className={`bi ${estimatedCycles > 50 ? "bi-exclamation-triangle" : "bi-info-circle"} me-1`}></i>
               <strong>Estimasi:</strong> Pesan akan dikirim ke semua group sebanyak <strong>~{estimatedCycles} kali</strong> selama {runForm.totalDurationHours} jam
               (setiap {Number(runForm.intervalMinutes) >= 60 ? `${Number(runForm.intervalMinutes) / 60} jam` : `${runForm.intervalMinutes} menit`}).
+              {estimatedCycles > 50 ? (
+                <div className="mt-1 small">
+                  <strong>Peringatan:</strong> Jumlah siklus sangat banyak ({estimatedCycles}x). Pastikan interval dalam <strong>menit</strong> (bukan jam). Contoh: 1 jam = 60 menit.
+                </div>
+              ) : null}
             </div>
           ) : null}
 
@@ -2773,7 +2780,8 @@ export default function DashboardPage() {
 
     const getEstimatedTotalCycles = (run: RunItem) => {
       if (!run.totalDurationHours || !run.intervalMinutes) return null;
-      return Math.floor((run.totalDurationHours * 60) / run.intervalMinutes);
+      // FIX: Same formula as backend, capped at 500 for safety
+      return Math.min(Math.max(1, Math.floor((run.totalDurationHours * 60) / run.intervalMinutes)), 500);
     };
 
     return (

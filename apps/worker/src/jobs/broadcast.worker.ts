@@ -527,24 +527,27 @@ const sendOneCycle = async (params: {
 // ═══════════════════════════════════════════════════════════
 
 const processBroadcastRun = async (runId: string) => {
-  // Peek at the current run to check if startedAt already exists (resume case)
+  // FIX: Claim is now done in processTick (atomically before fire-and-forget).
+  // Here we just ensure the run is RUNNING and set startedAt if needed.
   const existingRun = await prisma.broadcastRun.findUnique({
     where: { id: runId },
-    select: { startedAt: true }
+    select: { startedAt: true, status: true }
   });
 
-  // Atomic claim: PENDING → RUNNING
-  const claimed = await prisma.broadcastRun.updateMany({
-    where: { id: runId, status: RunStatus.PENDING },
+  if (!existingRun || (existingRun.status !== RunStatus.RUNNING && existingRun.status !== RunStatus.PENDING)) {
+    return; // Already claimed by another process or cancelled
+  }
+
+  // Ensure it's marked as RUNNING with proper fields
+  await prisma.broadcastRun.update({
+    where: { id: runId },
     data: {
       status: RunStatus.RUNNING,
       reason: null,
       consecutiveFailCount: 0,
-      ...(existingRun?.startedAt ? {} : { startedAt: new Date() })
+      ...(existingRun.startedAt ? {} : { startedAt: new Date() })
     }
   });
-
-  if (claimed.count === 0) return;
 
   const run = await prisma.broadcastRun.findUnique({
     where: { id: runId },
@@ -588,8 +591,18 @@ const processBroadcastRun = async (runId: string) => {
   const broadcastStartTime = run.startedAt ? run.startedAt.getTime() : Date.now();
   const totalDurationMs = hasBatchInterval ? run.totalDurationHours! * 60 * 60 * 1000 : 0;
   const intervalMs = hasBatchInterval ? run.intervalMinutes! * 60 * 1000 : 0;
+
+  // FIX: maxCycles = 1 (siklus pertama langsung jalan) + berapa kali interval muat di sisa waktu
+  // Contoh: 4 jam durasi, interval 60 menit → 1 + floor((240 - 0) / 60) = 1 + 4 = 5? TIDAK.
+  // Yang benar: siklus pertama di menit 0, lalu setiap intervalMinutes menit.
+  // Jadi jumlah siklus = floor(totalDurationMinutes / intervalMinutes) + 1
+  // TAPI kita harus hati-hati: jika durasi habis persis di batas, siklus terakhir mungkin tidak sempat jalan.
+  // Rumus paling aman: floor(totalDurationMinutes / intervalMinutes)
+  // Contoh: 4 jam = 240 menit, interval 60 menit → floor(240/60) = 4 siklus
+  // Ini benar karena: siklus 1 di menit 0, siklus 2 di menit 60, siklus 3 di menit 120, siklus 4 di menit 180.
+  // Siklus 5 di menit 240 = TEPAT habis, tidak sempat jalan.
   const maxCycles = hasBatchInterval
-    ? Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!)
+    ? Math.max(1, Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!))
     : 1;
 
   // Resume: start from where we left off
@@ -600,12 +613,23 @@ const processBroadcastRun = async (runId: string) => {
   let totalSent = run.sentCount ?? 0;
   let totalFailed = run.failedCount ?? 0;
 
+  // FIX: Safety cap on maxCycles to prevent runaway loops
+  const safeMaxCycles = Math.min(maxCycles, 500);
+  if (maxCycles > 500) {
+    await logActivity("worker", `maxCycles capped from ${maxCycles} to 500 (safety limit)`, "WARN", {
+      runId: run.id,
+      originalMaxCycles: maxCycles,
+      totalDurationHours: run.totalDurationHours,
+      intervalMinutes: run.intervalMinutes
+    });
+  }
+
   await logActivity("worker", "Broadcast run DIMULAI", "INFO", {
     runId: run.id,
     mode: hasBatchInterval ? "BATCH_INTERVAL" : "SINGLE",
     sendMode,
     totalGroups: allGroups.length,
-    maxCycles,
+    maxCycles: safeMaxCycles,
     totalDurationHours: run.totalDurationHours,
     intervalMinutes: run.intervalMinutes,
     resumeFromCycle: completedCycles,
@@ -619,11 +643,11 @@ const processBroadcastRun = async (runId: string) => {
 
     while (true) {
       // Check 1: Max cycles reached?
-      if (completedCycles >= maxCycles) {
-        await logActivity("worker", `Semua ${maxCycles} siklus tercapai`, "INFO", {
+      if (completedCycles >= safeMaxCycles) {
+        await logActivity("worker", `Semua ${safeMaxCycles} siklus tercapai`, "INFO", {
           runId: run.id,
           completedCycles,
-          maxCycles,
+          maxCycles: safeMaxCycles,
           totalSent,
           totalFailed
         });
@@ -685,9 +709,16 @@ const processBroadcastRun = async (runId: string) => {
       };
       cycleDetails.push(cycleDetail);
 
-      // Update cumulative totals
-      totalSent += cycleResult.sent;
-      totalFailed += cycleResult.failed;
+      // FIX: Don't accumulate from cycleResult because sentCount/failedCount
+      // are already incremented per-message in the database via prisma updates.
+      // Instead, re-read the actual counts from the database to avoid double-counting
+      // especially after pause/resume scenarios.
+      const freshRun = await prisma.broadcastRun.findUnique({
+        where: { id: run.id },
+        select: { sentCount: true, failedCount: true }
+      });
+      totalSent = freshRun?.sentCount ?? totalSent;
+      totalFailed = freshRun?.failedCount ?? totalFailed;
 
       // Handle cycle result
       if (cycleResult.status === "paused") {
@@ -727,7 +758,7 @@ const processBroadcastRun = async (runId: string) => {
       // Cycle completed successfully
       completedCycles += 1;
 
-      const isLastCycle = completedCycles >= maxCycles;
+      const isLastCycle = completedCycles >= safeMaxCycles;
 
       // Update run state
       await prisma.broadcastRun.update({
@@ -741,16 +772,16 @@ const processBroadcastRun = async (runId: string) => {
           cycleDetails: cycleDetails as any,
           consecutiveFailCount: 0,
           reason: isLastCycle
-            ? `Semua ${completedCycles}/${maxCycles} siklus selesai.`
-            : `Siklus ${completedCycles}/${maxCycles} selesai. Menunggu ${run.intervalMinutes} menit...`
+            ? `Semua ${completedCycles}/${safeMaxCycles} siklus selesai.`
+            : `Siklus ${completedCycles}/${safeMaxCycles} selesai. Menunggu ${run.intervalMinutes} menit...`
         }
       });
 
       if (isLastCycle) {
-        await logActivity("worker", `Semua siklus selesai (${completedCycles}/${maxCycles})`, "INFO", {
+        await logActivity("worker", `Semua siklus selesai (${completedCycles}/${safeMaxCycles})`, "INFO", {
           runId: run.id,
           completedCycles,
-          maxCycles,
+          maxCycles: safeMaxCycles,
           totalSent,
           totalFailed
         });
@@ -779,7 +810,7 @@ const processBroadcastRun = async (runId: string) => {
         where: { id: run.id },
         data: {
           nextCycleAt,
-          reason: `Siklus ${completedCycles}/${maxCycles} selesai. Siklus berikutnya: ${nextCycleAt.toLocaleTimeString("id-ID")} (interval ${run.intervalMinutes} menit)`
+          reason: `Siklus ${completedCycles}/${safeMaxCycles} selesai. Siklus berikutnya: ${nextCycleAt.toLocaleTimeString("id-ID")} (interval ${run.intervalMinutes} menit)`
         }
       });
 
@@ -848,8 +879,13 @@ const processBroadcastRun = async (runId: string) => {
       return;
     }
 
-    totalSent = cycleResult.sent;
-    totalFailed = cycleResult.failed;
+    // FIX: Read actual counts from DB to avoid double-counting after pause/resume
+    const freshSingleRun = await prisma.broadcastRun.findUnique({
+      where: { id: run.id },
+      select: { sentCount: true, failedCount: true }
+    });
+    totalSent = freshSingleRun?.sentCount ?? cycleResult.sent;
+    totalFailed = freshSingleRun?.failedCount ?? cycleResult.failed;
     completedCycles = 1;
 
     cycleDetails.push({
@@ -965,7 +1001,26 @@ const processTick = async () => {
     });
 
     for (const pending of pendingRuns) {
-      if (activeRunIds.has(pending.id)) continue;
+      // FIX: Skip runs already being processed (prevents race condition / duplicate cycles)
+      if (activeRunIds.has(pending.id)) {
+        await logActivity("worker", "Skipping run already in-progress locally", "DEBUG", {
+          runId: pending.id,
+          activeRunCount: activeRunIds.size
+        });
+        continue;
+      }
+
+      // FIX: Atomically claim the run BEFORE fire-and-forget to prevent
+      // the next tick from picking up the same PENDING run
+      const claimed = await prisma.broadcastRun.updateMany({
+        where: { id: pending.id, status: RunStatus.PENDING },
+        data: { status: RunStatus.RUNNING }
+      });
+
+      if (claimed.count === 0) {
+        // Another tick or worker already claimed this run
+        continue;
+      }
 
       activeRunIds.add(pending.id);
 
