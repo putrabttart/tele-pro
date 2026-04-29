@@ -825,6 +825,7 @@ const processBroadcastRun = async (runId: string) => {
       // Wait until the absolute nextCycleAt time, not just relative interval
       // This ensures interval is fully respected even after pause/resume
       let aborted = false;
+      let heartbeatTicks = 0;
       while (Date.now() < nextCycleAt.getTime()) {
         const remainingWait = nextCycleAt.getTime() - Date.now();
         const sleepChunk = Math.min(INTERVAL_CHECK_MS, remainingWait);
@@ -836,6 +837,19 @@ const processBroadcastRun = async (runId: string) => {
         if (!(await isRunStillActive(run.id))) {
           aborted = true;
           break;
+        }
+
+        // Heartbeat: touch updatedAt every ~60s so recoverStaleRunningRuns
+        // knows this run is alive and waiting for the next cycle, not crashed.
+        heartbeatTicks++;
+        if (heartbeatTicks % 6 === 0) {
+          await prisma.broadcastRun.update({
+            where: { id: run.id },
+            data: {
+              updatedAt: new Date(),
+              reason: `Siklus ${completedCycles}/${safeMaxCycles} selesai. Menunggu siklus berikutnya: ${nextCycleAt.toLocaleTimeString("id-ID")} (sisa ${Math.ceil(remainingWait / 60000)} menit)`
+            }
+          });
         }
       }
 
@@ -960,12 +974,24 @@ const recoverStaleRunningRuns = async () => {
       status: RunStatus.RUNNING,
       updatedAt: { lte: staleThreshold }
     },
-    select: { id: true, sentCount: true, failedCount: true, completedCycles: true }
+    select: { id: true, sentCount: true, failedCount: true, completedCycles: true, nextCycleAt: true }
   });
 
   if (staleRuns.length === 0) return;
 
   for (const stale of staleRuns) {
+    // Skip if the run is waiting for its next cycle interval.
+    // nextCycleAt being set and in the future means the worker is alive
+    // and legitimately sleeping between cycles — NOT a stale/crashed run.
+    if (stale.nextCycleAt && stale.nextCycleAt.getTime() > Date.now()) {
+      continue;
+    }
+
+    // Skip if this worker instance is actively processing this run
+    if (activeRunIds.has(stale.id)) {
+      continue;
+    }
+
     await prisma.broadcastRun.update({
       where: { id: stale.id },
       data: {
