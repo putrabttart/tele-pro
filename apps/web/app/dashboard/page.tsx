@@ -655,8 +655,7 @@ const runStatusBadgeClass = (status: RunItem["status"]) => {
 
 const runStatusLabel = (run: RunItem): { label: string; sublabel: string; icon: string } => {
   const hasBatch = run.totalDurationHours && run.intervalMinutes;
-  // FIX: Same formula as backend, capped at 500 for safety
-  const maxCycles = hasBatch ? Math.min(Math.max(1, Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!)), 500) : null;
+  const maxCycles = hasBatch ? Math.max(1, Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!)) : null;
 
   if (run.status === "RUNNING") {
     // Check if it's waiting between cycles (reason contains "Waiting")
@@ -2323,8 +2322,7 @@ export default function DashboardPage() {
     const dur = Number(runForm.totalDurationHours);
     const intv = Number(runForm.intervalMinutes);
     if (!dur || !intv || dur <= 0 || intv <= 0) return null;
-    // FIX: Same formula as backend, capped at 500 for safety
-    return Math.min(Math.max(1, Math.floor((dur * 60) / intv)), 500);
+    return Math.max(1, Math.floor((dur * 60) / intv));
   }, [runForm.totalDurationHours, runForm.intervalMinutes]);
 
   const renderBroadcastSection = () => {
@@ -2780,8 +2778,7 @@ export default function DashboardPage() {
 
     const getEstimatedTotalCycles = (run: RunItem) => {
       if (!run.totalDurationHours || !run.intervalMinutes) return null;
-      // FIX: Same formula as backend, capped at 500 for safety
-      return Math.min(Math.max(1, Math.floor((run.totalDurationHours * 60) / run.intervalMinutes)), 500);
+      return Math.max(1, Math.floor((run.totalDurationHours * 60) / run.intervalMinutes));
     };
 
     return (

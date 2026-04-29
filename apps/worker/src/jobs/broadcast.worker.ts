@@ -613,16 +613,7 @@ const processBroadcastRun = async (runId: string) => {
   let totalSent = run.sentCount ?? 0;
   let totalFailed = run.failedCount ?? 0;
 
-  // FIX: Safety cap on maxCycles to prevent runaway loops
-  const safeMaxCycles = Math.min(maxCycles, 500);
-  if (maxCycles > 500) {
-    await logActivity("worker", `maxCycles capped from ${maxCycles} to 500 (safety limit)`, "WARN", {
-      runId: run.id,
-      originalMaxCycles: maxCycles,
-      totalDurationHours: run.totalDurationHours,
-      intervalMinutes: run.intervalMinutes
-    });
-  }
+  const safeMaxCycles = maxCycles;
 
   await logActivity("worker", "Broadcast run DIMULAI", "INFO", {
     runId: run.id,
