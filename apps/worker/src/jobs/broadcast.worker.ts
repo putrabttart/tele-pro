@@ -1003,7 +1003,7 @@ const processTick = async () => {
     for (const pending of pendingRuns) {
       // FIX: Skip runs already being processed (prevents race condition / duplicate cycles)
       if (activeRunIds.has(pending.id)) {
-        await logActivity("worker", "Skipping run already in-progress locally", "DEBUG", {
+        await logActivity("worker", "Skipping run already in-progress locally", "WARN", {
           runId: pending.id,
           activeRunCount: activeRunIds.size
         });
