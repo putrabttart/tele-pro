@@ -831,6 +831,10 @@ export default function DashboardPage() {
 
   const [groupAddInput, setGroupAddInput] = useState("");
   const [groupAddAccountId, setGroupAddAccountId] = useState("");
+  const [groupAccountId, setGroupAccountId] = useState("");
+  const [batchUsernames, setBatchUsernames] = useState("");
+  const [batchTarget, setBatchTarget] = useState<"single" | "all">("single");
+  const [batchAccountId, setBatchAccountId] = useState("");
 
   const [templateForm, setTemplateForm] = useState({
     name: "",
@@ -897,6 +901,34 @@ export default function DashboardPage() {
   const connectedAccounts = useMemo(() => {
     return accounts.filter((item) => item.status === "CONNECTED");
   }, [accounts]);
+
+  const groupAccountLabel = useMemo(() => {
+    const account = accounts.find((item) => item.id === groupAccountId);
+    return account ? `${account.label} (${account.phone})` : "";
+  }, [accounts, groupAccountId]);
+
+  useEffect(() => {
+    if (!connectedAccounts.length) {
+      return;
+    }
+
+    const exists = connectedAccounts.some((acc) => acc.id === groupAccountId);
+    if (!groupAccountId || !exists) {
+      setGroupAccountId(connectedAccounts[0].id);
+    }
+  }, [groupAccountId, connectedAccounts]);
+
+  useEffect(() => {
+    if (!groupAddAccountId && groupAccountId) {
+      setGroupAddAccountId(groupAccountId);
+    }
+  }, [groupAddAccountId, groupAccountId]);
+
+  useEffect(() => {
+    if (!batchAccountId && groupAccountId) {
+      setBatchAccountId(groupAccountId);
+    }
+  }, [batchAccountId, groupAccountId]);
 
   const activeGroupsCount = useMemo(() => {
     return groups.filter((item) => item.isActive).length;
@@ -1237,6 +1269,9 @@ export default function DashboardPage() {
     }
 
     try {
+      const groupsPromise = groupAccountId
+        ? apiFetch<GroupItem[]>(`/api/groups?accountId=${groupAccountId}`)
+        : Promise.resolve<GroupItem[]>([]);
       const [
         overviewRes,
         groupsRes,
@@ -1249,7 +1284,7 @@ export default function DashboardPage() {
         busyAccountsRes
       ] = await Promise.all([
         apiFetch<DashboardOverview>("/api/dashboard/overview"),
-        apiFetch<GroupItem[]>("/api/groups"),
+        groupsPromise,
         apiFetch<SettingItem[]>("/api/settings"),
         apiFetch<ScheduleItem[]>("/api/scheduler"),
         apiFetch<TelegramAccount[]>("/api/telegram/accounts"),
@@ -1279,7 +1314,7 @@ export default function DashboardPage() {
       }
       setLoading(false);
     }
-  }, []);
+  }, [groupAccountId]);
 
   useEffect(() => {
     if (!getToken()) {
@@ -1389,6 +1424,119 @@ export default function DashboardPage() {
 
     setSettingForm(mapSettingToForm(activeSetting));
   }, [settings]);
+
+  useEffect(() => {
+    if (runForm.accountId && runForm.accountId !== groupAccountId) {
+      setGroupAccountId(runForm.accountId);
+    }
+  }, [runForm.accountId, groupAccountId]);
+
+  useEffect(() => {
+    if (!groupAccountId) {
+      setGroups([]);
+      return;
+    }
+
+    void loadAll(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupAccountId]);
+
+  const handleSyncGroups = async (silent = false) => {
+    if (!groupAccountId) {
+      if (!silent) {
+        setError("Pilih akun Telegram untuk sync group.");
+      }
+      return;
+    }
+
+    await withBusyAction("group-sync", async () => {
+      const groupsRes = await apiFetch<GroupItem[]>(`/api/groups?accountId=${groupAccountId}&sync=1`);
+      setGroups(groupsRes);
+      if (!silent) {
+        const labelSuffix = groupAccountLabel ? ` (${groupAccountLabel})` : "";
+        setNotice(`Group disinkronkan dari Telegram${labelSuffix}`);
+      }
+    });
+  };
+
+  useEffect(() => {
+    if (activeSection !== "groups") {
+      return;
+    }
+    if (!groupAccountId) {
+      return;
+    }
+
+    void handleSyncGroups(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSection, groupAccountId]);
+
+  const handleBatchAddUsernames = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    await withBusyAction("group-batch-add", async () => {
+      const rawInput = batchUsernames.trim();
+      if (!rawInput) {
+        throw new Error("Masukkan username group terlebih dahulu.");
+      }
+
+      const tokens = rawInput
+        .split(/[\s,;]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+      const valid: string[] = [];
+      const invalid: string[] = [];
+
+      tokens.forEach((item) => {
+        const cleaned = item.replace(/^@/, "");
+        if (/^[A-Za-z][A-Za-z0-9_]{3,}$/.test(cleaned)) {
+          valid.push(cleaned);
+        } else {
+          invalid.push(item);
+        }
+      });
+
+      const usernames = Array.from(new Set(valid));
+
+      if (!usernames.length) {
+        throw new Error("Tidak ada username valid untuk diproses.");
+      }
+
+      if (batchTarget === "single" && !batchAccountId) {
+        throw new Error("Pilih akun Telegram untuk target single.");
+      }
+
+      const result = await apiFetch<{
+        target: "single" | "all";
+        totalUsernames: number;
+        totals: {
+          accounts: number;
+          created: number;
+          updated: number;
+          skipped: number;
+          joined: number;
+          notFound: number;
+          joinFailed: number;
+        };
+      }>("/api/groups/add-usernames-batch", {
+        method: "POST",
+        body: JSON.stringify({
+          usernames,
+          target: batchTarget,
+          accountId: batchTarget === "single" ? batchAccountId : undefined
+        })
+      });
+
+      const invalidSuffix = invalid.length ? ` (${invalid.length} username tidak valid diabaikan)` : "";
+      setNotice(
+        `Batch username selesai: ${result.totalUsernames} username, ${result.totals.accounts} akun, `
+        + `${result.totals.joined} join, ${result.totals.notFound} tidak ditemukan${invalidSuffix}`
+      );
+      setBatchUsernames("");
+      await loadAll();
+    });
+  };
 
   const handleAddGroup = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1717,8 +1865,10 @@ export default function DashboardPage() {
       {
         id: "groups",
         label: "Target Group",
-        detail: `${activeGroupsCount} group aktif`,
-        ok: activeGroupsCount > 0
+        detail: groupAccountId
+          ? `${activeGroupsCount} group aktif${groupAccountLabel ? ` (${groupAccountLabel})` : ""}`
+          : "Pilih akun untuk lihat group",
+        ok: groupAccountId ? activeGroupsCount > 0 : false
       },
       {
         id: "broadcast-content",
@@ -2023,8 +2173,53 @@ export default function DashboardPage() {
   };
 
   const renderGroupsSection = () => {
+    const emptyGroupMessage = !groupAccountId
+      ? "Pilih akun Telegram untuk melihat group."
+      : groupSearch
+        ? "Tidak ada group yang cocok dengan pencarian."
+        : "Belum ada group. Tambahkan group menggunakan form di atas.";
+
     return (
       <>
+        <div className="tbm-panel">
+          <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div>
+              <h5 className="tbm-panel-title mb-0">Akun Group</h5>
+              <p className="tbm-panel-desc mb-0">Pilih akun untuk menampilkan dan sync group miliknya.</p>
+            </div>
+            <button
+              className="btn btn-outline-primary"
+              type="button"
+              onClick={() => void handleSyncGroups()}
+              disabled={isBusy("group-sync") || syncing || !groupAccountId}
+            >
+              {isBusy("group-sync") ? "Sinkron..." : "Sync dari Telegram"}
+            </button>
+          </div>
+
+          <div className="mt-3">
+            <label className="form-label">Akun Telegram</label>
+            <select
+              className="form-select"
+              value={groupAccountId}
+              onChange={(e) => setGroupAccountId(e.target.value)}
+              disabled={!connectedAccounts.length || syncing}
+            >
+              <option value="">Pilih akun...</option>
+              {connectedAccounts.map((acc) => (
+                <option key={acc.id} value={acc.id}>{acc.label} ({acc.phone})</option>
+              ))}
+            </select>
+          </div>
+
+          {!connectedAccounts.length ? (
+            <div className="alert alert-warning mt-3 mb-0">
+              <i className="bi bi-exclamation-triangle me-1"></i>
+              Belum ada akun Telegram terhubung. Hubungkan akun dulu di menu <strong>Session Telegram</strong>.
+            </div>
+          ) : null}
+        </div>
+
         <div className="tbm-panel">
           <h5 className="tbm-panel-title">Tambah Group</h5>
           <p className="tbm-panel-desc">Paste link group, username, atau link addlist. Akun yang terhubung otomatis join ke group.</p>
@@ -2077,10 +2272,76 @@ export default function DashboardPage() {
         </div>
 
         <div className="tbm-panel">
+          <h5 className="tbm-panel-title">Batch Username Group</h5>
+          <p className="tbm-panel-desc">Tambah banyak username sekaligus. Gunakan pemisah baris, spasi, atau koma.</p>
+
+          <form className="mt-3" onSubmit={(event) => void handleBatchAddUsernames(event)}>
+            <div className="mb-2">
+              <label className="form-label">Daftar Username</label>
+              <textarea
+                className="form-control"
+                rows={4}
+                placeholder="@groupA\n@groupB\ngroup_c"
+                value={batchUsernames}
+                onChange={(e) => setBatchUsernames(e.target.value)}
+              />
+              <FieldHelp>Hanya username. Contoh: @namagroup atau namagroup.</FieldHelp>
+            </div>
+
+            <div className="mb-2">
+              <label className="form-label">Target Akun</label>
+              <select
+                className="form-select"
+                value={batchTarget}
+                onChange={(e) => setBatchTarget(e.target.value as "single" | "all")}
+              >
+                <option value="single">Akun tertentu</option>
+                <option value="all">Semua akun terhubung</option>
+              </select>
+            </div>
+
+            {batchTarget === "single" ? (
+              <div className="mb-2">
+                <label className="form-label">Akun Telegram</label>
+                <select
+                  className="form-select"
+                  value={batchAccountId}
+                  onChange={(e) => setBatchAccountId(e.target.value)}
+                  disabled={!connectedAccounts.length}
+                >
+                  <option value="">Pilih akun...</option>
+                  {connectedAccounts.map((acc) => (
+                    <option key={acc.id} value={acc.id}>{acc.label} ({acc.phone})</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+
+            <button
+              className="btn btn-primary"
+              type="submit"
+              disabled={
+                isBusy("group-batch-add")
+                || syncing
+                || !batchUsernames.trim()
+                || (batchTarget === "single" && !batchAccountId)
+                || !connectedAccounts.length
+              }
+            >
+              {isBusy("group-batch-add") ? "Memproses batch..." : "Tambah Batch Username"}
+            </button>
+          </form>
+        </div>
+
+        <div className="tbm-panel">
           <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
             <div>
               <h5 className="tbm-panel-title mb-0">Daftar Group</h5>
-              <p className="tbm-panel-desc mb-0">{groups.length} group terdaftar, {activeGroupsCount} aktif.</p>
+              <p className="tbm-panel-desc mb-0">
+                {groupAccountId
+                  ? `${groups.length} group terdaftar${groupAccountLabel ? ` (${groupAccountLabel})` : ""}, ${activeGroupsCount} aktif.`
+                  : "Pilih akun untuk melihat daftar group."}
+              </p>
             </div>
             <div className="d-flex align-items-center gap-2">
               <div className="tbm-table-search">
@@ -2158,7 +2419,7 @@ export default function DashboardPage() {
                     );
                   })
                 ) : (
-                  <TableEmptyRow colSpan={4} message={groupSearch ? "Tidak ada group yang cocok dengan pencarian." : "Belum ada group. Tambahkan group menggunakan form di atas."} />
+                  <TableEmptyRow colSpan={4} message={emptyGroupMessage} />
                 )}
               </tbody>
             </table>
@@ -2624,7 +2885,12 @@ export default function DashboardPage() {
               <div className="mb-2">
                 <div className="small text-secondary">
                   <div><strong>Mode:</strong> {runForm.mode === "DIRECT_TEXT" ? "Direct Message" : "Forward from Link"}</div>
-                  <div><strong>Target:</strong> {activeGroupsCount} group aktif</div>
+                  <div>
+                    <strong>Target:</strong>{" "}
+                    {groupAccountId
+                      ? `${activeGroupsCount} group aktif${groupAccountLabel ? ` (${groupAccountLabel})` : ""}`
+                      : "Pilih akun untuk lihat group"}
+                  </div>
                   <div>
                     <strong>Akun:</strong>{" "}
                     {runForm.accountId

@@ -5,6 +5,7 @@ import { asyncHandler } from "../../utils/async-handler";
 import { groupController } from "./group.controller";
 import {
   addGroupByLinkSchema,
+  addGroupBatchSchema,
   createGroupSchema,
   importGroupFolderLinkSchema,
   importGroupTextSchema,
@@ -36,6 +37,10 @@ groupRoutes.delete("/:id", asyncHandler(async (req, res) => {
 
 groupRoutes.post("/add-by-link", validateBody(addGroupByLinkSchema), asyncHandler(async (req, res) => {
   await groupController.addByLink(req, res);
+}));
+
+groupRoutes.post("/add-usernames-batch", validateBody(addGroupBatchSchema), asyncHandler(async (req, res) => {
+  await groupController.addUsernamesBatch(req, res);
 }));
 
 groupRoutes.post("/import/text", validateBody(importGroupTextSchema), asyncHandler(async (req, res) => {

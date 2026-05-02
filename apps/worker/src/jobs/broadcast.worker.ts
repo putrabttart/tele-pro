@@ -580,10 +580,15 @@ const processBroadcastRun = async (runId: string) => {
     return;
   }
 
-  // Fetch active groups
-  const allGroups = await prisma.group.findMany({ where: { isActive: true } });
+  // Fetch active groups for this account only
+  const allGroups = await prisma.group.findMany({
+    where: {
+      isActive: true,
+      accounts: { some: { accountId: account.id } }
+    }
+  });
   if (allGroups.length === 0) {
-    await markRunFailed(run.id, "Tidak ada grup aktif yang ditemukan");
+    await markRunFailed(run.id, "Tidak ada grup aktif untuk akun ini");
     return;
   }
 

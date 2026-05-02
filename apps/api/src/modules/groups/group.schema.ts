@@ -31,3 +31,11 @@ export const addGroupByLinkSchema = z.object({
   input: z.string().min(1),
   accountId: z.string().optional()
 });
+
+export const addGroupBatchSchema = z.object({
+  usernames: z.array(z.string().min(1)).min(1),
+  target: z.enum(["single", "all"]).default("single"),
+  accountId: z.string().optional()
+}).refine((val) => (val.target === "all" ? true : Boolean(val.accountId)), {
+  message: "accountId is required when target=single"
+});

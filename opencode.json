@@ -8,8 +8,8 @@
         "baseURL": "https://adye.dev/v1"
       },
       "models": {
-        "claude-opus-4.6": {
-          "name": "Claude Opus 4.6",
+        "cclaude-sonnet-4.5": {
+          "name": "Claude Sonnet 4.5",
           "attachment": true
         }
       }

@@ -4,7 +4,19 @@ import { groupService } from "./group.service";
 
 class GroupController {
   async list(req: Request, res: Response) {
-    const data = await groupService.list(req.query.search as string | undefined, req.query.tag as string | undefined);
+    const search = req.query.search as string | undefined;
+    const tag = req.query.tag as string | undefined;
+    const accountId = req.query.accountId as string | undefined;
+    const sync = req.query.sync === "1" || req.query.sync === "true";
+
+    if (sync) {
+      if (!accountId) {
+        throw new ApiError(400, "accountId wajib diisi untuk sync group");
+      }
+      await groupService.syncFromTelegram(accountId);
+    }
+
+    const data = await groupService.list(search, tag, accountId);
     res.json(data);
   }
 
@@ -56,6 +68,21 @@ class GroupController {
 
   async addByLink(req: Request, res: Response) {
     const result = await groupService.addByLink(req.body.input, req.body.accountId);
+    res.json(result);
+  }
+
+  async addUsernamesBatch(req: Request, res: Response) {
+    const { usernames, target, accountId } = req.body as {
+      usernames: string[];
+      target: "single" | "all";
+      accountId?: string;
+    };
+
+    if (target === "single" && !accountId) {
+      throw new ApiError(400, "accountId wajib diisi untuk target single");
+    }
+
+    const result = await groupService.addUsernamesBatch(usernames, target, accountId);
     res.json(result);
   }
 }

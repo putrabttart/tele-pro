@@ -15,11 +15,48 @@ type UpsertGroupInput = {
   isActive?: boolean;
 };
 
+type UpsertGroupResult = {
+  status: "created" | "updated" | "skipped";
+  groupId?: string;
+};
+
+type BatchAccountResult = {
+  accountId: string;
+  label: string;
+  phone: string;
+  total: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  joined: number;
+  notFound: number;
+  joinFailed: number;
+};
+
+type BatchAddResult = {
+  target: "single" | "all";
+  totalUsernames: number;
+  accounts: BatchAccountResult[];
+  totals: {
+    accounts: number;
+    created: number;
+    updated: number;
+    skipped: number;
+    joined: number;
+    notFound: number;
+    joinFailed: number;
+  };
+};
+
 const normalizeUsername = (username?: string) => {
   if (!username) {
     return undefined;
   }
   return username.replace(/^@/, "").trim();
+};
+
+const isValidUsername = (value: string) => {
+  return /^[A-Za-z][A-Za-z0-9_]{3,}$/.test(value);
 };
 
 const parseIdentifier = (value: string) => {
@@ -71,7 +108,11 @@ const resolveUsernameFromChat = (chat: Record<string, unknown>) => {
   return undefined;
 };
 
-const buildGroupFromChat = (chatValue: unknown, defaultTags: string[]) => {
+const buildGroupFromChat = (
+  chatValue: unknown,
+  defaultTags: string[],
+  options?: { isActive?: boolean }
+) => {
   if (!chatValue || typeof chatValue !== "object") {
     return null;
   }
@@ -81,13 +122,14 @@ const buildGroupFromChat = (chatValue: unknown, defaultTags: string[]) => {
   const id = toIdString(chat.id);
   const title = typeof chat.title === "string" ? chat.title : undefined;
   const username = resolveUsernameFromChat(chat);
+  const isActive = options?.isActive;
 
   if (username) {
     return {
       username,
       title,
       tags: defaultTags,
-      isActive: true
+      isActive
     } as UpsertGroupInput;
   }
 
@@ -100,7 +142,7 @@ const buildGroupFromChat = (chatValue: unknown, defaultTags: string[]) => {
       telegramId: `-100${id}`,
       title,
       tags: defaultTags,
-      isActive: true
+      isActive
     } as UpsertGroupInput;
   }
 
@@ -109,7 +151,7 @@ const buildGroupFromChat = (chatValue: unknown, defaultTags: string[]) => {
       telegramId: `-${id}`,
       title,
       tags: defaultTags,
-      isActive: true
+      isActive
     } as UpsertGroupInput;
   }
 
@@ -117,12 +159,12 @@ const buildGroupFromChat = (chatValue: unknown, defaultTags: string[]) => {
 };
 
 class GroupService {
-  private async upsertGroup(data: UpsertGroupInput) {
+  private async upsertGroup(data: UpsertGroupInput): Promise<UpsertGroupResult> {
     const username = normalizeUsername(data.username);
     const telegramId = data.telegramId?.trim();
 
     if (!username && !telegramId) {
-      return "skipped" as const;
+      return { status: "skipped" };
     }
 
     const whereClause = [
@@ -148,10 +190,10 @@ class GroupService {
         }
       });
 
-      return "updated" as const;
+      return { status: "updated", groupId: existing.id };
     }
 
-    await prisma.group.create({
+    const created = await prisma.group.create({
       data: {
         telegramId,
         username,
@@ -161,13 +203,25 @@ class GroupService {
       }
     });
 
-    return "created" as const;
+    return { status: "created", groupId: created.id };
   }
 
-  async list(search?: string, tag?: string) {
+  private async linkAccountGroups(accountId: string, groupIds: string[]) {
+    if (!groupIds.length) {
+      return;
+    }
+
+    await prisma.accountGroup.createMany({
+      data: groupIds.map((groupId) => ({ accountId, groupId })),
+      skipDuplicates: true
+    });
+  }
+
+  async list(search?: string, tag?: string, accountId?: string) {
     return prisma.group.findMany({
       where: {
         AND: [
+          accountId ? { accounts: { some: { accountId } } } : {},
           search
             ? {
                 OR: [
@@ -213,6 +267,255 @@ class GroupService {
     await prisma.group.delete({ where: { id } });
   }
 
+  async syncFromTelegram(accountId: string) {
+    const account = await prisma.telegramAccount.findUnique({ where: { id: accountId } });
+
+    if (!account?.encryptedSession) {
+      throw new ApiError(400, "Tidak ada akun Telegram yang terhubung untuk sinkronisasi group.");
+    }
+
+    const session = decryptText(account.encryptedSession);
+    const client = await mtprotoClient.connectFromSession(session);
+
+    try {
+      const dialogs = await (client as any).getDialogs({ limit: 500 });
+      const rawList = Array.isArray(dialogs)
+        ? dialogs
+        : Array.isArray((dialogs as any)?.dialogs)
+          ? (dialogs as any).dialogs
+          : Array.isArray((dialogs as any)?.chats)
+            ? (dialogs as any).chats
+            : [];
+
+      let created = 0;
+      let updated = 0;
+      let skipped = 0;
+      const groupIds: string[] = [];
+      const groupIds: string[] = [];
+
+      for (const item of rawList) {
+        const entity = (item as any)?.entity ?? item;
+        if (!entity || typeof entity !== "object") {
+          skipped += 1;
+          continue;
+        }
+
+        const className = (entity as { className?: string }).className ?? "";
+        if (className !== "Channel" && className !== "Chat") {
+          continue;
+        }
+
+        const payload = buildGroupFromChat(entity, [], { isActive: undefined });
+        if (!payload) {
+          skipped += 1;
+          continue;
+        }
+
+        const status = await this.upsertGroup(payload);
+        if (status.status === "created") {
+          created += 1;
+        } else if (status.status === "updated") {
+          updated += 1;
+        } else {
+          skipped += 1;
+        }
+
+        if (status.groupId) {
+          groupIds.push(status.groupId);
+        }
+      }
+
+      const uniqueGroupIds = Array.from(new Set(groupIds));
+
+      await prisma.$transaction(async (tx) => {
+        await tx.accountGroup.deleteMany({ where: { accountId } });
+        if (uniqueGroupIds.length) {
+          await tx.accountGroup.createMany({
+            data: uniqueGroupIds.map((groupId) => ({ accountId, groupId })),
+            skipDuplicates: true
+          });
+        }
+      });
+
+      await logActivity("groups", "Synced groups from Telegram", "INFO", {
+        accountId,
+        total: uniqueGroupIds.length,
+        created,
+        updated,
+        skipped
+      });
+
+      return {
+        accountId,
+        total: uniqueGroupIds.length,
+        created,
+        updated,
+        skipped
+      };
+    } finally {
+      await client.disconnect();
+    }
+  }
+
+  async addUsernamesBatch(usernames: string[], target: "single" | "all", accountId?: string): Promise<BatchAddResult> {
+    const normalized = Array.from(new Set(
+      usernames
+        .map((item) => normalizeUsername(item))
+        .filter((item): item is string => Boolean(item))
+        .filter((item) => isValidUsername(item))
+    ));
+
+    if (!normalized.length) {
+      throw new ApiError(400, "Tidak ada username valid untuk diproses.");
+    }
+
+    const accounts = target === "all"
+      ? await prisma.telegramAccount.findMany({
+          where: {
+            status: TelegramConnectionStatus.CONNECTED,
+            encryptedSession: { not: null }
+          },
+          orderBy: { updatedAt: "desc" }
+        })
+      : accountId
+        ? await prisma.telegramAccount.findMany({ where: { id: accountId } })
+        : [];
+
+    if (!accounts.length) {
+      throw new ApiError(400, "Tidak ada akun Telegram yang tersedia untuk batch add.");
+    }
+
+    if (target === "single") {
+      const chosen = accounts[0];
+      if (!chosen?.encryptedSession) {
+        throw new ApiError(400, "Akun Telegram yang dipilih belum terhubung.");
+      }
+    }
+
+    const results: BatchAccountResult[] = [];
+
+    for (const account of accounts) {
+      if (!account.encryptedSession) {
+        continue;
+      }
+
+      const session = decryptText(account.encryptedSession);
+      const client = await mtprotoClient.connectFromSession(session);
+
+      try {
+        let created = 0;
+        let updated = 0;
+        let skipped = 0;
+        let joined = 0;
+        let notFound = 0;
+        let joinFailed = 0;
+        const groupIds: string[] = [];
+
+        for (const username of normalized) {
+          let chat: any = null;
+          try {
+            const resolved = await client.invoke(new Api.contacts.ResolveUsername({ username }));
+            chat = (resolved as any).chats?.[0];
+          } catch {
+            chat = null;
+          }
+
+          if (!chat) {
+            notFound += 1;
+            continue;
+          }
+
+          let joinOk = false;
+          try {
+            await client.invoke(new Api.channels.JoinChannel({
+              channel: new Api.InputChannel({
+                channelId: chat.id,
+                accessHash: chat.accessHash ?? BigInt(0)
+              })
+            }));
+            joinOk = true;
+            joined += 1;
+          } catch (joinErr) {
+            const errMsg = joinErr instanceof Error ? joinErr.message : String(joinErr);
+            if (/already/i.test(errMsg)) {
+              joinOk = true;
+            } else {
+              joinFailed += 1;
+            }
+          }
+
+          const payload = buildGroupFromChat(chat, [], { isActive: true });
+          if (!payload) {
+            skipped += 1;
+            continue;
+          }
+
+          const status = await this.upsertGroup(payload);
+          if (status.status === "created") {
+            created += 1;
+          } else if (status.status === "updated") {
+            updated += 1;
+          } else {
+            skipped += 1;
+          }
+
+          if (joinOk && status.groupId) {
+            groupIds.push(status.groupId);
+          }
+        }
+
+        await this.linkAccountGroups(account.id, groupIds);
+
+        results.push({
+          accountId: account.id,
+          label: account.label,
+          phone: account.phone,
+          total: normalized.length,
+          created,
+          updated,
+          skipped,
+          joined,
+          notFound,
+          joinFailed
+        });
+      } finally {
+        await client.disconnect();
+      }
+    }
+
+    const totals = results.reduce(
+      (acc, item) => {
+        acc.accounts += 1;
+        acc.created += item.created;
+        acc.updated += item.updated;
+        acc.skipped += item.skipped;
+        acc.joined += item.joined;
+        acc.notFound += item.notFound;
+        acc.joinFailed += item.joinFailed;
+        return acc;
+      },
+      { accounts: 0, created: 0, updated: 0, skipped: 0, joined: 0, notFound: 0, joinFailed: 0 }
+    );
+
+    await logActivity("groups", "Batch add usernames", "INFO", {
+      target,
+      usernames: normalized.length,
+      accounts: totals.accounts,
+      created: totals.created,
+      updated: totals.updated,
+      joined: totals.joined,
+      notFound: totals.notFound,
+      joinFailed: totals.joinFailed
+    });
+
+    return {
+      target,
+      totalUsernames: normalized.length,
+      accounts: results,
+      totals
+    };
+  }
+
   async importFromText(content: string, defaultTags: string[]) {
     const lines = content
       .split(/\r?\n/)
@@ -247,9 +550,9 @@ class GroupService {
         isActive: true
       });
 
-      if (status === "created") {
+      if (status.status === "created") {
         created += 1;
-      } else if (status === "updated") {
+      } else if (status.status === "updated") {
         updated += 1;
       } else {
         skipped += 1;
@@ -296,21 +599,27 @@ class GroupService {
       let skipped = 0;
 
       for (const chat of chats) {
-        const payload = buildGroupFromChat(chat, defaultTags);
+        const payload = buildGroupFromChat(chat, defaultTags, { isActive: true });
         if (!payload) {
           skipped += 1;
           continue;
         }
 
         const status = await this.upsertGroup(payload);
-        if (status === "created") {
+        if (status.status === "created") {
           created += 1;
-        } else if (status === "updated") {
+        } else if (status.status === "updated") {
           updated += 1;
         } else {
           skipped += 1;
         }
+
+        if (status.groupId) {
+          groupIds.push(status.groupId);
+        }
       }
+
+      await this.linkAccountGroups(account.id, groupIds);
 
       await logActivity("groups", "Imported groups from folder link", "INFO", {
         slug,
@@ -397,14 +706,21 @@ class GroupService {
         let updated = 0;
         let skipped = 0;
 
+        const groupIds: string[] = [];
         for (const chat of chats) {
-          const payload = buildGroupFromChat(chat, []);
+          const payload = buildGroupFromChat(chat, [], { isActive: true });
           if (!payload) { skipped += 1; continue; }
           const status = await this.upsertGroup(payload);
-          if (status === "created") created += 1;
-          else if (status === "updated") updated += 1;
+          if (status.status === "created") created += 1;
+          else if (status.status === "updated") updated += 1;
           else skipped += 1;
+
+          if (status.groupId) {
+            groupIds.push(status.groupId);
+          }
         }
+
+        await this.linkAccountGroups(account.id, groupIds);
 
         await logActivity("groups", "Added groups from folder link with auto-join", "INFO", {
           slug: parsed.value,
@@ -434,10 +750,14 @@ class GroupService {
           throw new ApiError(400, "Gagal join group. Link invite mungkin sudah expired atau tidak valid.");
         }
 
-        const payload = buildGroupFromChat(chat, []);
-        let status: "created" | "updated" | "skipped" = "skipped";
+        const payload = buildGroupFromChat(chat, [], { isActive: true });
+        let status: UpsertGroupResult = { status: "skipped" };
         if (payload) {
           status = await this.upsertGroup(payload);
+        }
+
+        if (status.groupId) {
+          await this.linkAccountGroups(account.id, [status.groupId]);
         }
 
         await logActivity("groups", "Joined group via private invite", "INFO", {
@@ -449,9 +769,9 @@ class GroupService {
         return {
           type: "private_invite" as const,
           joined: true,
-          created: status === "created" ? 1 : 0,
-          updated: status === "updated" ? 1 : 0,
-          skipped: status === "skipped" ? 1 : 0,
+          created: status.status === "created" ? 1 : 0,
+          updated: status.status === "updated" ? 1 : 0,
+          skipped: status.status === "skipped" ? 1 : 0,
           total: 1
         };
       }
@@ -481,10 +801,14 @@ class GroupService {
         }
       }
 
-      const payload = buildGroupFromChat(chat, []);
-      let status: "created" | "updated" | "skipped" = "skipped";
+      const payload = buildGroupFromChat(chat, [], { isActive: true });
+      let status: UpsertGroupResult = { status: "skipped" };
       if (payload) {
         status = await this.upsertGroup(payload);
+      }
+
+      if (status.groupId) {
+        await this.linkAccountGroups(account.id, [status.groupId]);
       }
 
       await logActivity("groups", "Joined group via username", "INFO", {
@@ -496,9 +820,9 @@ class GroupService {
       return {
         type: "username" as const,
         joined: true,
-        created: status === "created" ? 1 : 0,
-        updated: status === "updated" ? 1 : 0,
-        skipped: status === "skipped" ? 1 : 0,
+        created: status.status === "created" ? 1 : 0,
+        updated: status.status === "updated" ? 1 : 0,
+        skipped: status.status === "skipped" ? 1 : 0,
         total: 1
       };
     } finally {

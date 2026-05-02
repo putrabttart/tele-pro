@@ -50,6 +50,7 @@ model TelegramAccount {
   createdAt        DateTime                 @default(now())
   updatedAt        DateTime                 @updatedAt
   logs             SendLog[]
+  groups           AccountGroup[]
 }
 
 model Group {
@@ -62,6 +63,21 @@ model Group {
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
   logs       SendLog[]
+  accounts   AccountGroup[]
+}
+
+model AccountGroup {
+  id        String          @id @default(cuid())
+  accountId String
+  groupId   String
+  account   TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  group     Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@unique([accountId, groupId])
+  @@index([accountId])
+  @@index([groupId])
 }
 
 model MessageTemplate {
