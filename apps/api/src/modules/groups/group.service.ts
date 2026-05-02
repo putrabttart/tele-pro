@@ -291,7 +291,6 @@ class GroupService {
       let updated = 0;
       let skipped = 0;
       const groupIds: string[] = [];
-      const groupIds: string[] = [];
 
       for (const item of rawList) {
         const entity = (item as any)?.entity ?? item;
@@ -597,6 +596,7 @@ class GroupService {
       let created = 0;
       let updated = 0;
       let skipped = 0;
+      const groupIds: string[] = [];
 
       for (const chat of chats) {
         const payload = buildGroupFromChat(chat, defaultTags, { isActive: true });
