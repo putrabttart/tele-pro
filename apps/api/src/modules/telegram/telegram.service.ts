@@ -2,6 +2,7 @@ import { TelegramConnectionStatus } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { decryptText, encryptText } from "../../utils/crypto";
 import { logActivity } from "../../utils/logger";
+import { ApiError } from "../../utils/api-error";
 import { mtprotoClient } from "../../telegram/mtproto-client";
 
 class TelegramService {
@@ -12,7 +13,16 @@ class TelegramService {
   }
 
   async requestOtp(phone: string, label: string) {
-    const result = await mtprotoClient.requestOtp(phone, label);
+    let result;
+    try {
+      result = await mtprotoClient.requestOtp(phone, label);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "";
+      if (/AUTH_KEY_DUPLICATED/i.test(msg)) {
+        throw new ApiError(409, "Akun ini sedang digunakan oleh broadcast yang aktif. Hentikan broadcast dulu atau tunggu sampai selesai, lalu coba lagi.");
+      }
+      throw error;
+    }
 
     await prisma.telegramAccount.upsert({
       where: { phone },
@@ -32,7 +42,16 @@ class TelegramService {
   }
 
   async verifyOtp(phone: string, code: string) {
-    const result = await mtprotoClient.verifyOtp(phone, code);
+    let result;
+    try {
+      result = await mtprotoClient.verifyOtp(phone, code);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "";
+      if (/AUTH_KEY_DUPLICATED/i.test(msg)) {
+        throw new ApiError(409, "Akun ini sedang digunakan oleh broadcast yang aktif. Hentikan broadcast dulu atau tunggu sampai selesai, lalu coba lagi.");
+      }
+      throw error;
+    }
 
     const encryptedSession = encryptText(result.session);
 

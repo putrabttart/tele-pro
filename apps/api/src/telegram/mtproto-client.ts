@@ -11,13 +11,15 @@ type PendingLogin = {
 
 const pendingLogins = new Map<string, PendingLogin>();
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const createClient = (sessionString = "") => {
   return new TelegramClient(
     new StringSession(sessionString),
     env.TELEGRAM_API_ID!,
     env.TELEGRAM_API_HASH!,
     {
-      connectionRetries: 2,
+      connectionRetries: 3,
       autoReconnect: false,
       baseLogger: new Logger(LogLevel.NONE)
     }
@@ -30,6 +32,29 @@ const ensureTelegramConfig = () => {
   }
 };
 
+/**
+ * Connect with retry on AUTH_KEY_DUPLICATED.
+ * This error occurs when another process (worker) has an active connection
+ * with the same session. We wait and retry since the other connection
+ * may release soon.
+ */
+const connectWithRetry = async (client: TelegramClient, maxRetries = 3): Promise<void> => {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await client.connect();
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (/AUTH_KEY_DUPLICATED/i.test(message) && attempt < maxRetries) {
+        // Wait for the other connection to release
+        await sleep(5000 * (attempt + 1));
+        continue;
+      }
+      throw error;
+    }
+  }
+};
+
 export class MtprotoClient {
   async requestOtp(phone: string, label: string) {
     ensureTelegramConfig();
@@ -37,7 +62,7 @@ export class MtprotoClient {
     const client = createClient();
 
     try {
-      await client.connect();
+      await connectWithRetry(client);
 
       const sent = await (client as any).sendCode(
         {
@@ -63,7 +88,7 @@ export class MtprotoClient {
         status: "OTP_SENT"
       };
     } finally {
-      await client.disconnect();
+      try { await client.disconnect(); } catch { /* ignore */ }
     }
   }
 
@@ -76,7 +101,7 @@ export class MtprotoClient {
     const client = createClient(pending.tempSession);
 
     try {
-      await client.connect();
+      await connectWithRetry(client);
       await client.invoke(
         new Api.auth.SignIn({
           phoneNumber: phone,
@@ -94,7 +119,7 @@ export class MtprotoClient {
         label: pending.label
       };
     } finally {
-      await client.disconnect();
+      try { await client.disconnect(); } catch { /* ignore */ }
     }
   }
 
@@ -102,8 +127,7 @@ export class MtprotoClient {
     ensureTelegramConfig();
 
     const client = createClient(sessionString);
-
-    await client.connect();
+    await connectWithRetry(client);
     return client;
   }
 }

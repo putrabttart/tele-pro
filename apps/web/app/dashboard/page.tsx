@@ -807,6 +807,7 @@ export default function DashboardPage() {
   const [groupPerPage, setGroupPerPage] = useState(10);
   const [runHistoryPage, setRunHistoryPage] = useState(0);
   const [runHistoryPerPage, setRunHistoryPerPage] = useState(5);
+  const [runStatusFilter, setRunStatusFilter] = useState<"ACTIVE" | "COMPLETED" | "FAILED" | "ALL">("ACTIVE");
   const [sendLogPage, setSendLogPage] = useState(0);
   const [sendLogPerPage, setSendLogPerPage] = useState(10);
   const [topbarSearch, setTopbarSearch] = useState("");
@@ -967,11 +968,14 @@ export default function DashboardPage() {
     const runMap = new Map<string, { id: string; label: string; status: string; accountLabel: string }>();
     for (const log of sendLogs) {
       if (runMap.has(log.runId)) continue;
+      // Only show runs that are active (RUNNING, PAUSED, PENDING)
+      const runStatus = log.run?.status ?? "?";
+      if (!["RUNNING", "PAUSED", "PENDING"].includes(runStatus)) continue;
       const accLabel = log.account ? `${log.account.label} (${log.account.phone})` : "Auto";
       runMap.set(log.runId, {
         id: log.runId,
         label: log.run?.label || log.runId.slice(0, 8),
-        status: log.run?.status ?? "?",
+        status: runStatus,
         accountLabel: accLabel
       });
     }
@@ -1018,15 +1022,22 @@ export default function DashboardPage() {
 
   // Reset pagination when data or filter changes
   useEffect(() => { setGroupPage(0); }, [filteredGroups.length, groupSearch]);
-  useEffect(() => { setRunHistoryPage(0); }, [runs.length]);
   useEffect(() => { setSendLogPage(0); }, [filteredLogs.length, logRunFilter, logFilter, logDateFrom, logDateTo]);
 
   // Paginated slices
   const groupTotalPages = Math.max(1, Math.ceil(filteredGroups.length / groupPerPage));
   const paginatedGroups = filteredGroups.slice(groupPage * groupPerPage, (groupPage + 1) * groupPerPage);
 
-  const runHistoryTotalPages = Math.max(1, Math.ceil(runs.length / runHistoryPerPage));
-  const paginatedRuns = runs.slice(runHistoryPage * runHistoryPerPage, (runHistoryPage + 1) * runHistoryPerPage);
+  const filteredRuns = useMemo(() => {
+    if (runStatusFilter === "ALL") return runs;
+    if (runStatusFilter === "ACTIVE") return runs.filter((r) => ["RUNNING", "PAUSED", "PENDING"].includes(r.status));
+    return runs.filter((r) => r.status === runStatusFilter);
+  }, [runs, runStatusFilter]);
+
+  useEffect(() => { setRunHistoryPage(0); }, [filteredRuns.length, runStatusFilter]);
+
+  const runHistoryTotalPages = Math.max(1, Math.ceil(filteredRuns.length / runHistoryPerPage));
+  const paginatedRuns = filteredRuns.slice(runHistoryPage * runHistoryPerPage, (runHistoryPage + 1) * runHistoryPerPage);
 
   const sendLogTotalPages = Math.max(1, Math.ceil(filteredLogs.length / sendLogPerPage));
   const paginatedLogs = filteredLogs.slice(sendLogPage * sendLogPerPage, (sendLogPage + 1) * sendLogPerPage);
@@ -1849,6 +1860,20 @@ export default function DashboardPage() {
     });
   };
 
+  const handleDisconnectAccount = async (id: string) => {
+    const confirmed = window.confirm("Yakin ingin disconnect akun ini? Session akan dihapus dan perlu login ulang.");
+    if (!confirmed) return;
+
+    await withBusyAction(`disconnect-${id}`, async () => {
+      await apiFetch(`/api/telegram/accounts/${id}/disconnect`, {
+        method: "POST"
+      });
+
+      setNotice("Akun Telegram berhasil di-disconnect");
+      await loadAll();
+    });
+  };
+
   const handleExportLogs = async () => {
     await withBusyAction("logs-export", async () => {
       const token = getToken();
@@ -2173,6 +2198,7 @@ export default function DashboardPage() {
                 <th>Label</th>
                 <th>Phone</th>
                 <th>Status</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -2186,10 +2212,26 @@ export default function DashboardPage() {
                         {acc.status}
                       </span>
                     </td>
+                    <td>
+                      {acc.status === "CONNECTED" ? (
+                        <button
+                          className="btn btn-sm btn-outline-danger"
+                          type="button"
+                          onClick={() => void handleDisconnectAccount(acc.id)}
+                          disabled={isBusy(`disconnect-${acc.id}`) || syncing}
+                          title="Disconnect session"
+                        >
+                          <i className="bi bi-power me-1"></i>
+                          {isBusy(`disconnect-${acc.id}`) ? "..." : "Disconnect"}
+                        </button>
+                      ) : (
+                        <span className="text-secondary small">-</span>
+                      )}
+                    </td>
                   </tr>
                 ))
               ) : (
-                <TableEmptyRow colSpan={3} message="Belum ada akun Telegram. Mulai dari Request OTP untuk menambahkan akun." />
+                <TableEmptyRow colSpan={4} message="Belum ada akun Telegram. Mulai dari Request OTP untuk menambahkan akun." />
               )}
             </tbody>
           </table>
@@ -3272,6 +3314,16 @@ export default function DashboardPage() {
               <p className="tbm-panel-desc mb-0">Riwayat semua broadcast yang pernah dijalankan.</p>
             </div>
             <div className="d-flex align-items-center gap-2">
+              <select
+                className="tbm-perpage-select"
+                value={runStatusFilter}
+                onChange={(e) => setRunStatusFilter(e.target.value as any)}
+              >
+                <option value="ACTIVE">Sedang Berjalan</option>
+                <option value="COMPLETED">Selesai</option>
+                <option value="FAILED">Gagal / Dihentikan</option>
+                <option value="ALL">Semua</option>
+              </select>
               <button
                 className="btn btn-sm btn-outline-danger"
                 type="button"
@@ -3281,7 +3333,7 @@ export default function DashboardPage() {
               >
                 <i className="bi bi-trash me-1"></i>Hapus Semua
               </button>
-              <span className="tbm-pagination-info">{runs.length} total</span>
+              <span className="tbm-pagination-info">{filteredRuns.length} / {runs.length}</span>
               <select
                 className="tbm-perpage-select"
                 value={runHistoryPerPage}
@@ -3407,7 +3459,7 @@ export default function DashboardPage() {
             </table>
           </div>
 
-          {runs.length > runHistoryPerPage ? (
+          {filteredRuns.length > runHistoryPerPage ? (
             <div className="tbm-pagination">
               <button className="tbm-pagination-btn" type="button" disabled={runHistoryPage === 0} onClick={() => setRunHistoryPage(0)} title="Halaman pertama"><i className="bi bi-chevron-double-left"></i></button>
               <button className="tbm-pagination-btn" type="button" disabled={runHistoryPage === 0} onClick={() => setRunHistoryPage((p) => Math.max(0, p - 1))}><i className="bi bi-chevron-left"></i></button>

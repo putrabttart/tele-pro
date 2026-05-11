@@ -823,10 +823,12 @@ const processBroadcastRun = async (runId: string) => {
   // Validate mode requirements
   if (sendMode === SendMode.NEW_MESSAGE && !directMessageText) {
     await markRunFailed(run.id, "Mode DIRECT_TEXT membutuhkan teks pesan yang tidak kosong");
+    await mtprotoSender.releaseClient(account.encryptedSession!);
     return;
   }
   if (sendMode === SendMode.FORWARD && !forwardSourceChatId) {
     await markRunFailed(run.id, "Mode FORWARD membutuhkan source chat yang valid");
+    await mtprotoSender.releaseClient(account.encryptedSession!);
     return;
   }
 
@@ -841,6 +843,7 @@ const processBroadcastRun = async (runId: string) => {
   );
   if (allGroups.length === 0) {
     await markRunFailed(run.id, "Tidak ada grup aktif untuk akun ini");
+    await mtprotoSender.releaseClient(account.encryptedSession!);
     return;
   }
 
@@ -1187,6 +1190,9 @@ const processBroadcastRun = async (runId: string) => {
     completedCycles,
     totalDuration: formatDuration(Date.now() - broadcastStartTime)
   });
+
+  // Release the Telegram client connection for this account
+  await mtprotoSender.releaseClient(account.encryptedSession!);
 };
 
 
