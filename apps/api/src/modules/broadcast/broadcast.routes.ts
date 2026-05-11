@@ -33,3 +33,11 @@ broadcastRoutes.post("/runs/:id/resume", asyncHandler(async (req, res) => {
 broadcastRoutes.post("/runs/:id/cancel", asyncHandler(async (req, res) => {
   await broadcastController.cancel(req, res);
 }));
+
+broadcastRoutes.delete("/runs/:id", asyncHandler(async (req, res) => {
+  await broadcastController.deleteRun(req, res);
+}));
+
+broadcastRoutes.delete("/runs", asyncHandler(async (_req, res) => {
+  await broadcastController.deleteAllRuns(_req, res);
+}));

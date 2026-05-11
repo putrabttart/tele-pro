@@ -36,6 +36,16 @@ class BroadcastController {
     const data = await broadcastService.cancelRun(req.params.id);
     res.json(data);
   }
+
+  async deleteRun(req: Request, res: Response) {
+    const data = await broadcastService.deleteRun(req.params.id);
+    res.json(data);
+  }
+
+  async deleteAllRuns(_req: Request, res: Response) {
+    const data = await broadcastService.deleteAllCompletedRuns();
+    res.json(data);
+  }
 }
 
 export const broadcastController = new BroadcastController();

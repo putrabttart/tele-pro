@@ -1,7 +1,8 @@
 import { RunStatus, SendMode, SendStatus, TelegramConnectionStatus } from "@prisma/client";
 import { env } from "../config/env";
-import { prisma } from "../config/prisma";
-import { mtprotoSender } from "../telegram/mtproto-sender";
+import { prisma, dbRetry } from "../config/prisma";
+import { classifyError, mtprotoSender } from "../telegram/mtproto-sender";
+import type { ErrorSeverity } from "../telegram/mtproto-sender";
 import { logActivity } from "../utils/logger";
 import { randomInt, shuffle } from "../utils/random";
 import { sleep } from "../utils/sleep";
@@ -15,11 +16,18 @@ const TEXT_MARKER_PREFIX = "__TBM_TEXT:";
 const FORWARD_SOURCE_MARKER_PREFIX = "__TBM_FORWARD_SOURCE:";
 const FORWARD_MESSAGE_MARKER_PREFIX = "__TBM_FORWARD_MESSAGE_ID:";
 
-// Anti-spam protection constants
-const MAX_CONSECUTIVE_FAILS = 10; // Max consecutive fails before auto-pause
+// Anti-spam protection constants (IMPROVED)
+const MAX_CONSECUTIVE_ACCOUNT_FAILS = 5; // Only count ACCOUNT-level fails (not group-level skips)
+const MAX_TOTAL_FAIL_RATIO = 0.85; // Pause if >85% of messages fail in a cycle
+const MIN_MESSAGES_FOR_RATIO_CHECK = 10; // Only check ratio after N messages
 const COOLDOWN_AFTER_CYCLE_MS = 5_000; // 5s cooldown between cycles (minimum)
 const STALE_RUN_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 const INTERVAL_CHECK_MS = 10_000; // Check every 10s during interval wait
+
+// Progressive delay: increase delay after consecutive issues
+const PROGRESSIVE_DELAY_MULTIPLIER = 1.5; // Multiply delay by this after each fail
+const MAX_PROGRESSIVE_DELAY_MS = 180_000; // Cap at 3 minutes
+const PROGRESSIVE_DELAY_RESET_AFTER = 3; // Reset after N consecutive successes
 
 // ═══════════════════════════════════════════════════════════
 // TYPES
@@ -58,37 +66,43 @@ type CycleDetail = {
 // ═══════════════════════════════════════════════════════════
 
 const markRunFailed = async (runId: string, message: string) => {
-  await prisma.broadcastRun.update({
-    where: { id: runId },
-    data: {
-      status: RunStatus.FAILED,
-      reason: message,
-      finishedAt: new Date()
-    }
-  });
+  await dbRetry(() =>
+    prisma.broadcastRun.update({
+      where: { id: runId },
+      data: {
+        status: RunStatus.FAILED,
+        reason: message,
+        finishedAt: new Date()
+      }
+    })
+  );
 
   await logActivity("worker", `Run FAILED: ${message}`, "ERROR", { runId, reason: message });
 };
 
 const selectAccount = async (accountId?: string, currentRunId?: string) => {
   if (accountId) {
-    return prisma.telegramAccount.findUnique({ where: { id: accountId } });
+    return dbRetry(() => prisma.telegramAccount.findUnique({ where: { id: accountId } }));
   }
 
-  const busyRuns = await prisma.broadcastRun.findMany({
-    where: {
-      status: { in: [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED] },
-      requestedAccountId: { not: null },
-      ...(currentRunId ? { id: { not: currentRunId } } : {})
-    },
-    select: { requestedAccountId: true }
-  });
+  const busyRuns = await dbRetry(() =>
+    prisma.broadcastRun.findMany({
+      where: {
+        status: { in: [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED] },
+        requestedAccountId: { not: null },
+        ...(currentRunId ? { id: { not: currentRunId } } : {})
+      },
+      select: { requestedAccountId: true }
+    })
+  );
   const busyAccountIds = new Set(busyRuns.map((r) => r.requestedAccountId!));
 
-  const candidates = await prisma.telegramAccount.findMany({
-    where: { status: TelegramConnectionStatus.CONNECTED },
-    orderBy: { updatedAt: "desc" }
-  });
+  const candidates = await dbRetry(() =>
+    prisma.telegramAccount.findMany({
+      where: { status: TelegramConnectionStatus.CONNECTED },
+      orderBy: { updatedAt: "desc" }
+    })
+  );
 
   return candidates.find((acc) => !busyAccountIds.has(acc.id)) ?? null;
 };
@@ -151,24 +165,71 @@ const parseRunPayload = (markers: string[]): ParsedRunPayload | null => {
 
 /**
  * Check if run is still active (not paused/cancelled/failed externally)
+ * Uses dbRetry to handle transient connection issues gracefully.
+ * On DB failure, assumes run is still active (optimistic) to avoid false stops.
  */
 const isRunStillActive = async (runId: string): Promise<boolean> => {
-  const run = await prisma.broadcastRun.findUnique({
-    where: { id: runId },
-    select: { status: true }
-  });
-  return run?.status === RunStatus.RUNNING;
+  try {
+    const run = await dbRetry(() =>
+      prisma.broadcastRun.findUnique({
+        where: { id: runId },
+        select: { status: true }
+      })
+    );
+    return run?.status === RunStatus.RUNNING;
+  } catch {
+    // If DB is unreachable after retries, assume still active
+    // to avoid stopping a broadcast due to transient DB issues
+    return true;
+  }
 };
 
+/**
+ * Safe database write — retries on transient errors, but never throws.
+ * Used for non-critical writes (SendLog, counter updates) that should not
+ * crash the broadcast if the DB is temporarily unreachable.
+ */
+const safeDbWrite = async <T>(operation: () => Promise<T>): Promise<T | null> => {
+  try {
+    return await dbRetry(operation, 2, 1500);
+  } catch (error) {
+    // Log but don't crash — the broadcast continues
+    const msg = error instanceof Error ? error.message : "Unknown DB error";
+    // eslint-disable-next-line no-console
+    console.warn(`[safeDbWrite] DB write failed after retries: ${msg.slice(0, 200)}`);
+    return null;
+  }
+};
+
+/**
+ * Calculate progressive delay based on recent failure pattern.
+ * More consecutive account-level fails = longer delay between messages.
+ */
+const calculateProgressiveDelay = (
+  baseDelayMs: number,
+  consecutiveAccountFails: number
+): number => {
+  if (consecutiveAccountFails === 0) return baseDelayMs;
+
+  const multiplied = baseDelayMs * Math.pow(PROGRESSIVE_DELAY_MULTIPLIER, consecutiveAccountFails);
+  return Math.min(multiplied, MAX_PROGRESSIVE_DELAY_MS);
+};
+
+
 // ═══════════════════════════════════════════════════════════
-// CORE: SEND ONE CYCLE
+// CORE: SEND ONE CYCLE (IMPROVED ANTI-SPAM)
 // ═══════════════════════════════════════════════════════════
 
 /**
  * Execute one complete cycle of sending to all groups.
  * 
- * KEY FIX: cycleNumber parameter ensures SendLog deduplication is per-cycle,
- * not across all cycles. This was the root cause of cycles 2+ failing.
+ * KEY IMPROVEMENTS:
+ * 1. Error severity classification — only ACCOUNT-level errors count toward consecutive fails
+ * 2. Group-level errors (CHAT_WRITE_FORBIDDEN, etc.) are SKIPPED without penalty
+ * 3. Progressive delay — delay increases after account-level issues
+ * 4. Fail ratio check — auto-pause if too many messages fail (indicates account problem)
+ * 5. FLOOD_WAIT auto-handled by mtproto-sender (≤120s waits automatically)
+ * 6. SLOWMODE_WAIT auto-handled by mtproto-sender (waits then retries)
  */
 const sendOneCycle = async (params: {
   runId: string;
@@ -195,19 +256,23 @@ const sendOneCycle = async (params: {
   let cycleSent = 0;
   let cycleFailed = 0;
   let cycleSkipped = 0;
-  let consecutiveFails = 0;
+  let consecutiveAccountFails = 0; // Only count account-level errors
+  let consecutiveSuccesses = 0;
+  let currentDelayMultiplier = 1;
 
   const { runId, cycleNumber, setting, allGroups } = params;
 
   // Update run: mark current cycle start
-  await prisma.broadcastRun.update({
-    where: { id: runId },
-    data: {
-      currentCycleStartedAt: new Date(),
-      currentCycleNumber: cycleNumber,
-      reason: `Siklus ${cycleNumber} sedang berjalan...`
-    }
-  });
+  await dbRetry(() =>
+    prisma.broadcastRun.update({
+      where: { id: runId },
+      data: {
+        currentCycleStartedAt: new Date(),
+        currentCycleNumber: cycleNumber,
+        reason: `Siklus ${cycleNumber} sedang berjalan...`
+      }
+    })
+  );
 
   await logActivity("worker", `Siklus ${cycleNumber} DIMULAI`, "INFO", {
     runId,
@@ -216,17 +281,17 @@ const sendOneCycle = async (params: {
     startTime: new Date().toISOString()
   });
 
-  // ═══ KEY FIX: Only skip groups already sent IN THIS SPECIFIC CYCLE ═══
-  // Previously this queried ALL success logs for the run (no cycle filter),
-  // causing cycle 2+ to see all groups as "already sent"
-  const alreadySentInThisCycle = await prisma.sendLog.findMany({
-    where: {
-      runId,
-      cycleNumber, // ← THIS IS THE FIX
-      status: SendStatus.SUCCESS
-    },
-    select: { groupId: true }
-  });
+  // Only skip groups already sent IN THIS SPECIFIC CYCLE
+  const alreadySentInThisCycle = await dbRetry(() =>
+    prisma.sendLog.findMany({
+      where: {
+        runId,
+        cycleNumber,
+        status: SendStatus.SUCCESS
+      },
+      select: { groupId: true }
+    })
+  );
   const sentGroupIds = new Set(alreadySentInThisCycle.map((log) => log.groupId));
 
   const remainingGroups = allGroups.filter((g) => !sentGroupIds.has(g.id));
@@ -244,14 +309,16 @@ const sendOneCycle = async (params: {
 
   let pendingCount = groups.length;
 
-  await prisma.broadcastRun.update({
-    where: { id: runId },
-    data: {
-      totalGroups: allGroups.length,
-      pendingCount: groups.length,
-      reason: `Siklus ${cycleNumber}: Mengirim ke ${groups.length} grup...`
-    }
-  });
+  await safeDbWrite(() =>
+    prisma.broadcastRun.update({
+      where: { id: runId },
+      data: {
+        totalGroups: allGroups.length,
+        pendingCount: groups.length,
+        reason: `Siklus ${cycleNumber}: Mengirim ke ${groups.length} grup...`
+      }
+    })
+  );
 
   // Process groups in batches
   for (let start = 0; start < groups.length;) {
@@ -273,22 +340,25 @@ const sendOneCycle = async (params: {
       };
     }
 
-    // Anti-spam: Check consecutive fail limit
-    if (consecutiveFails >= MAX_CONSECUTIVE_FAILS) {
-      const reason = `Anti-spam: ${MAX_CONSECUTIVE_FAILS} kegagalan berturut-turut di siklus ${cycleNumber}`;
-      await prisma.broadcastRun.update({
-        where: { id: runId },
-        data: {
-          status: RunStatus.PAUSED,
-          reason,
-          consecutiveFailCount: consecutiveFails
-        }
-      });
+    // ═══ IMPROVED: Only count ACCOUNT-level consecutive fails ═══
+    if (consecutiveAccountFails >= MAX_CONSECUTIVE_ACCOUNT_FAILS) {
+      const reason = `Anti-spam: ${MAX_CONSECUTIVE_ACCOUNT_FAILS} kegagalan akun berturut-turut di siklus ${cycleNumber} (kemungkinan akun terkena limit)`;
+      await safeDbWrite(() =>
+        prisma.broadcastRun.update({
+          where: { id: runId },
+          data: {
+            status: RunStatus.PAUSED,
+            reason,
+            consecutiveFailCount: consecutiveAccountFails,
+            pausedUntil: new Date(Date.now() + 10 * 60 * 1000) // Auto-resume after 10 min
+          }
+        })
+      );
 
-      await logActivity("worker", `Siklus ${cycleNumber}: AUTO-PAUSE karena ${MAX_CONSECUTIVE_FAILS} gagal berturut`, "ERROR", {
+      await logActivity("worker", `Siklus ${cycleNumber}: AUTO-PAUSE karena ${MAX_CONSECUTIVE_ACCOUNT_FAILS} gagal akun berturut`, "ERROR", {
         runId,
         cycleNumber,
-        consecutiveFails,
+        consecutiveAccountFails,
         cycleSent,
         cycleFailed
       });
@@ -301,6 +371,47 @@ const sendOneCycle = async (params: {
         durationMs: Date.now() - cycleStartTime,
         failReason: reason
       };
+    }
+
+    // ═══ IMPROVED: Fail ratio check ═══
+    const totalAttempted = cycleSent + cycleFailed - sentGroupIds.size;
+    if (totalAttempted >= MIN_MESSAGES_FOR_RATIO_CHECK && cycleFailed > 0) {
+      // Only count non-skip failures for ratio
+      const accountFailRatio = consecutiveAccountFails > 0
+        ? (cycleFailed - cycleSkipped) / Math.max(1, totalAttempted - cycleSkipped)
+        : 0;
+
+      if (accountFailRatio >= MAX_TOTAL_FAIL_RATIO) {
+        const reason = `Anti-spam: Rasio kegagalan terlalu tinggi (${Math.round(accountFailRatio * 100)}%) di siklus ${cycleNumber}`;
+        await safeDbWrite(() =>
+          prisma.broadcastRun.update({
+            where: { id: runId },
+            data: {
+              status: RunStatus.PAUSED,
+              reason,
+              pausedUntil: new Date(Date.now() + 15 * 60 * 1000) // Auto-resume after 15 min
+            }
+          })
+        );
+
+        await logActivity("worker", `Siklus ${cycleNumber}: AUTO-PAUSE karena fail ratio tinggi`, "ERROR", {
+          runId,
+          cycleNumber,
+          accountFailRatio,
+          cycleSent,
+          cycleFailed,
+          cycleSkipped
+        });
+
+        return {
+          status: "failed",
+          sent: cycleSent,
+          failed: cycleFailed,
+          skipped: cycleSkipped,
+          durationMs: Date.now() - cycleStartTime,
+          failReason: reason
+        };
+      }
     }
 
     // Determine batch size
@@ -325,43 +436,45 @@ const sendOneCycle = async (params: {
 
       const text = params.sendMode === SendMode.NEW_MESSAGE ? params.messageText : "";
 
-      // Random delay between messages (anti-spam)
+      // ═══ IMPROVED: Progressive delay based on recent failures ═══
       const messageDelayMin = Math.max(1, setting.messageDelayMinSec);
       const messageDelayMax = Math.max(messageDelayMin, setting.messageDelayMaxSec);
-      const messageDelayMs = Math.max(
-        randomInt(messageDelayMin, messageDelayMax) * 1000,
-        env.MIN_SPACING_MS
-      );
+      const baseDelayMs = randomInt(messageDelayMin, messageDelayMax) * 1000;
+      const progressiveDelayMs = calculateProgressiveDelay(baseDelayMs, consecutiveAccountFails);
+      const messageDelayMs = Math.max(progressiveDelayMs, env.MIN_SPACING_MS);
       await sleep(messageDelayMs);
 
       const groupIdentifier = resolveGroupIdentifier(group);
       if (!groupIdentifier) {
-        cycleFailed += 1;
-        pendingCount -= 1;
+        // ═══ IMPROVED: Group identifier missing is a SKIP, not a consecutive fail ═══
         cycleSkipped += 1;
-        consecutiveFails += 1;
+        pendingCount -= 1;
 
-        await prisma.sendLog.create({
-          data: {
-            runId,
-            groupId: group.id,
-            accountId: params.accountId,
-            cycleNumber,
-            status: SendStatus.FAILED,
-            errorCode: "GROUP_IDENTIFIER_MISSING",
-            errorMessage: "Group has no username or telegramId"
-          }
-        });
+        await safeDbWrite(() =>
+          prisma.sendLog.create({
+            data: {
+              runId,
+              groupId: group.id,
+              accountId: params.accountId,
+              cycleNumber,
+              status: SendStatus.SKIPPED,
+              errorCode: "GROUP_IDENTIFIER_MISSING",
+              errorMessage: "Group has no username or telegramId"
+            }
+          })
+        );
 
-        await prisma.broadcastRun.update({
-          where: { id: runId },
-          data: { failedCount: { increment: 1 }, pendingCount }
-        });
+        await safeDbWrite(() =>
+          prisma.broadcastRun.update({
+            where: { id: runId },
+            data: { failedCount: { increment: 1 }, pendingCount }
+          })
+        );
 
         continue;
       }
 
-      // Send message
+      // Send message (with built-in retry for transient errors)
       const sendResult = await mtprotoSender.sendToGroup({
         encryptedSession: params.encryptedSession,
         groupIdentifier,
@@ -374,62 +487,212 @@ const sendOneCycle = async (params: {
 
       if (sendResult.ok) {
         cycleSent += 1;
-        consecutiveFails = 0; // Reset consecutive fails on success
+        consecutiveAccountFails = 0; // Reset account fails on success
+        consecutiveSuccesses += 1;
 
-        await prisma.sendLog.create({
-          data: {
-            runId,
-            groupId: group.id,
-            accountId: params.accountId,
-            cycleNumber,
-            status: SendStatus.SUCCESS
-          }
-        });
+        // Reset progressive delay after sustained success
+        if (consecutiveSuccesses >= PROGRESSIVE_DELAY_RESET_AFTER) {
+          currentDelayMultiplier = 1;
+        }
 
-        await prisma.broadcastRun.update({
-          where: { id: runId },
-          data: { sentCount: { increment: 1 }, pendingCount: { decrement: 1 } }
-        });
+        await safeDbWrite(() =>
+          prisma.sendLog.create({
+            data: {
+              runId,
+              groupId: group.id,
+              accountId: params.accountId,
+              cycleNumber,
+              status: SendStatus.SUCCESS
+            }
+          })
+        );
+
+        await safeDbWrite(() =>
+          prisma.broadcastRun.update({
+            where: { id: runId },
+            data: { sentCount: { increment: 1 }, pendingCount: { decrement: 1 } }
+          })
+        );
       } else {
+        const severity = sendResult.severity ?? classifyError(sendResult.errorCode);
+
+        // ═══ KEY IMPROVEMENT: Handle based on error severity ═══
+
+        if (severity === "skip") {
+          // Group-level issue — skip this group, NO penalty to consecutive fails
+          cycleSkipped += 1;
+          cycleFailed += 1;
+          consecutiveSuccesses = 0;
+
+          await safeDbWrite(() =>
+            prisma.sendLog.create({
+              data: {
+                runId,
+                groupId: group.id,
+                accountId: params.accountId,
+                cycleNumber,
+                status: SendStatus.SKIPPED,
+                errorCode: sendResult.errorCode,
+                errorMessage: sendResult.errorMessage
+              }
+            })
+          );
+
+          await safeDbWrite(() =>
+            prisma.broadcastRun.update({
+              where: { id: runId },
+              data: {
+                failedCount: { increment: 1 },
+                pendingCount: { decrement: 1 }
+              }
+            })
+          );
+
+          // Auto-deactivate group if it has a permanent issue
+          if (
+            sendResult.errorCode === "CHAT_WRITE_FORBIDDEN" ||
+            sendResult.errorCode === "CHANNEL_PRIVATE" ||
+            sendResult.errorCode === "USER_BANNED" ||
+            sendResult.errorCode === "USER_DEACTIVATED" ||
+            sendResult.errorCode === "CHAT_RESTRICTED"
+          ) {
+            await safeDbWrite(() =>
+              prisma.group.update({
+                where: { id: group.id },
+                data: { isActive: false }
+              })
+            );
+
+            await logActivity("worker", `Grup auto-deactivated: ${sendResult.errorCode}`, "WARN", {
+              runId,
+              groupId: group.id,
+              groupIdentifier,
+              errorCode: sendResult.errorCode
+            });
+          }
+
+          continue; // Move to next group immediately
+        }
+
+        if (severity === "fatal") {
+          // Session is dead — fail the entire run
+          await markRunFailed(runId, `Session invalid: ${sendResult.errorMessage}`);
+          return {
+            status: "failed",
+            sent: cycleSent,
+            failed: cycleFailed,
+            skipped: cycleSkipped,
+            durationMs: Date.now() - cycleStartTime,
+            failReason: "Session expired/invalid"
+          };
+        }
+
+        if (severity === "pause") {
+          // PEER_FLOOD — account-level spam detection, must pause
+          cycleFailed += 1;
+          consecutiveAccountFails += 1;
+          consecutiveSuccesses = 0;
+
+          await safeDbWrite(() =>
+            prisma.sendLog.create({
+              data: {
+                runId,
+                groupId: group.id,
+                accountId: params.accountId,
+                cycleNumber,
+                status: SendStatus.FAILED,
+                errorCode: sendResult.errorCode,
+                errorMessage: sendResult.errorMessage
+              }
+            })
+          );
+
+          if (setting.autoPauseOnLimit) {
+            // Pause with auto-resume after 30 minutes (PEER_FLOOD needs longer cooldown)
+            const pausedUntil = new Date(Date.now() + 30 * 60 * 1000);
+            await safeDbWrite(() =>
+              prisma.broadcastRun.update({
+                where: { id: runId },
+                data: {
+                  status: RunStatus.PAUSED,
+                  reason: `Siklus ${cycleNumber}: PEER_FLOOD terdeteksi - auto-resume setelah 30 menit cooldown`,
+                  pausedUntil,
+                  failedCount: { increment: 1 },
+                  pendingCount: { decrement: 1 },
+                  consecutiveFailCount: consecutiveAccountFails
+                }
+              })
+            );
+
+            await logActivity("worker", `Siklus ${cycleNumber}: PEER_FLOOD - auto-pause 30 menit`, "ERROR", {
+              runId,
+              cycleNumber,
+              cycleSent,
+              cycleFailed,
+              pausedUntil: pausedUntil.toISOString()
+            });
+
+            return {
+              status: "paused",
+              sent: cycleSent,
+              failed: cycleFailed,
+              skipped: cycleSkipped,
+              durationMs: Date.now() - cycleStartTime,
+              failReason: "PeerFlood detected - auto-resume in 30min"
+            };
+          }
+
+          continue;
+        }
+
+        // severity === "wait_retry" — already retried by mtproto-sender, still failed
+        // This means the retry mechanism exhausted all attempts
         cycleFailed += 1;
-        consecutiveFails += 1;
+        consecutiveAccountFails += 1;
+        consecutiveSuccesses = 0;
 
-        await prisma.sendLog.create({
-          data: {
-            runId,
-            groupId: group.id,
-            accountId: params.accountId,
-            cycleNumber,
-            status: SendStatus.FAILED,
-            errorCode: sendResult.errorCode,
-            errorMessage: sendResult.errorMessage
-          }
-        });
+        await safeDbWrite(() =>
+          prisma.sendLog.create({
+            data: {
+              runId,
+              groupId: group.id,
+              accountId: params.accountId,
+              cycleNumber,
+              status: SendStatus.FAILED,
+              errorCode: sendResult.errorCode,
+              errorMessage: sendResult.errorMessage
+            }
+          })
+        );
 
-        await prisma.broadcastRun.update({
-          where: { id: runId },
-          data: {
-            failedCount: { increment: 1 },
-            pendingCount: { decrement: 1 },
-            consecutiveFailCount: consecutiveFails
-          }
-        });
-
-        // Handle FLOOD_WAIT → auto-pause with timer
-        if (setting.autoPauseOnLimit && sendResult.errorCode === "FLOOD_WAIT" && sendResult.floodWaitSeconds) {
-          const pausedUntil = new Date(Date.now() + sendResult.floodWaitSeconds * 1000);
-
-          await prisma.broadcastRun.update({
+        await safeDbWrite(() =>
+          prisma.broadcastRun.update({
             where: { id: runId },
             data: {
-              status: RunStatus.PAUSED,
-              reason: `Siklus ${cycleNumber}: FloodWait ${sendResult.floodWaitSeconds}s - auto-resume setelah cooldown`,
-              pausedUntil,
-              completedCycles: cycleNumber - 1
+              failedCount: { increment: 1 },
+              pendingCount: { decrement: 1 },
+              consecutiveFailCount: consecutiveAccountFails
             }
-          });
+          })
+        );
 
-          await logActivity("worker", `Siklus ${cycleNumber}: FLOOD_WAIT ${sendResult.floodWaitSeconds}s - auto pause`, "WARN", {
+        // Handle FLOOD_WAIT that was too long for auto-wait (>120s)
+        if (setting.autoPauseOnLimit && sendResult.errorCode === "FLOOD_WAIT" && sendResult.floodWaitSeconds) {
+          const pausedUntil = new Date(Date.now() + (sendResult.floodWaitSeconds + 10) * 1000);
+
+          await safeDbWrite(() =>
+            prisma.broadcastRun.update({
+              where: { id: runId },
+              data: {
+                status: RunStatus.PAUSED,
+                reason: `Siklus ${cycleNumber}: FloodWait ${sendResult.floodWaitSeconds}s (terlalu lama) - auto-resume setelah cooldown`,
+                pausedUntil,
+                completedCycles: cycleNumber - 1
+              }
+            })
+          );
+
+          await logActivity("worker", `Siklus ${cycleNumber}: FLOOD_WAIT ${sendResult.floodWaitSeconds}s (>120s) - auto pause`, "WARN", {
             runId,
             cycleNumber,
             floodWaitSeconds: sendResult.floodWaitSeconds,
@@ -444,35 +707,7 @@ const sendOneCycle = async (params: {
             failed: cycleFailed,
             skipped: cycleSkipped,
             durationMs: Date.now() - cycleStartTime,
-            failReason: `FloodWait ${sendResult.floodWaitSeconds}s`
-          };
-        }
-
-        // Handle PEER_FLOOD → pause (manual resume needed)
-        if (setting.autoPauseOnLimit && sendResult.errorCode === "PEER_FLOOD") {
-          await prisma.broadcastRun.update({
-            where: { id: runId },
-            data: {
-              status: RunStatus.PAUSED,
-              reason: `Siklus ${cycleNumber}: PeerFlood terdeteksi - perlu resume manual`,
-              completedCycles: cycleNumber - 1
-            }
-          });
-
-          await logActivity("worker", `Siklus ${cycleNumber}: PEER_FLOOD - pause manual`, "ERROR", {
-            runId,
-            cycleNumber,
-            cycleSent,
-            cycleFailed
-          });
-
-          return {
-            status: "paused",
-            sent: cycleSent,
-            failed: cycleFailed,
-            skipped: cycleSkipped,
-            durationMs: Date.now() - cycleStartTime,
-            failReason: "PeerFlood detected"
+            failReason: `FloodWait ${sendResult.floodWaitSeconds}s (auto-resume scheduled)`
           };
         }
       }
@@ -522,37 +757,42 @@ const sendOneCycle = async (params: {
   };
 };
 
+
 // ═══════════════════════════════════════════════════════════
 // CORE: PROCESS BROADCAST RUN
 // ═══════════════════════════════════════════════════════════
 
 const processBroadcastRun = async (runId: string) => {
-  // FIX: Claim is now done in processTick (atomically before fire-and-forget).
-  // Here we just ensure the run is RUNNING and set startedAt if needed.
-  const existingRun = await prisma.broadcastRun.findUnique({
-    where: { id: runId },
-    select: { startedAt: true, status: true }
-  });
+  const existingRun = await dbRetry(() =>
+    prisma.broadcastRun.findUnique({
+      where: { id: runId },
+      select: { startedAt: true, status: true }
+    })
+  );
 
   if (!existingRun || (existingRun.status !== RunStatus.RUNNING && existingRun.status !== RunStatus.PENDING)) {
-    return; // Already claimed by another process or cancelled
+    return;
   }
 
   // Ensure it's marked as RUNNING with proper fields
-  await prisma.broadcastRun.update({
-    where: { id: runId },
-    data: {
-      status: RunStatus.RUNNING,
-      reason: null,
-      consecutiveFailCount: 0,
-      ...(existingRun.startedAt ? {} : { startedAt: new Date() })
-    }
-  });
+  await dbRetry(() =>
+    prisma.broadcastRun.update({
+      where: { id: runId },
+      data: {
+        status: RunStatus.RUNNING,
+        reason: null,
+        consecutiveFailCount: 0,
+        ...(existingRun.startedAt ? {} : { startedAt: new Date() })
+      }
+    })
+  );
 
-  const run = await prisma.broadcastRun.findUnique({
-    where: { id: runId },
-    include: { setting: true }
-  });
+  const run = await dbRetry(() =>
+    prisma.broadcastRun.findUnique({
+      where: { id: runId },
+      include: { setting: true }
+    })
+  );
 
   if (!run || run.status === RunStatus.COMPLETED) return;
 
@@ -581,12 +821,14 @@ const processBroadcastRun = async (runId: string) => {
   }
 
   // Fetch active groups for this account only
-  const allGroups = await prisma.group.findMany({
-    where: {
-      isActive: true,
-      accounts: { some: { accountId: account.id } }
-    }
-  });
+  const allGroups = await dbRetry(() =>
+    prisma.group.findMany({
+      where: {
+        isActive: true,
+        accounts: { some: { accountId: account.id } }
+      }
+    })
+  );
   if (allGroups.length === 0) {
     await markRunFailed(run.id, "Tidak ada grup aktif untuk akun ini");
     return;
@@ -597,15 +839,6 @@ const processBroadcastRun = async (runId: string) => {
   const totalDurationMs = hasBatchInterval ? run.totalDurationHours! * 60 * 60 * 1000 : 0;
   const intervalMs = hasBatchInterval ? run.intervalMinutes! * 60 * 1000 : 0;
 
-  // FIX: maxCycles = 1 (siklus pertama langsung jalan) + berapa kali interval muat di sisa waktu
-  // Contoh: 4 jam durasi, interval 60 menit → 1 + floor((240 - 0) / 60) = 1 + 4 = 5? TIDAK.
-  // Yang benar: siklus pertama di menit 0, lalu setiap intervalMinutes menit.
-  // Jadi jumlah siklus = floor(totalDurationMinutes / intervalMinutes) + 1
-  // TAPI kita harus hati-hati: jika durasi habis persis di batas, siklus terakhir mungkin tidak sempat jalan.
-  // Rumus paling aman: floor(totalDurationMinutes / intervalMinutes)
-  // Contoh: 4 jam = 240 menit, interval 60 menit → floor(240/60) = 4 siklus
-  // Ini benar karena: siklus 1 di menit 0, siklus 2 di menit 60, siklus 3 di menit 120, siklus 4 di menit 180.
-  // Siklus 5 di menit 240 = TEPAT habis, tidak sempat jalan.
   const maxCycles = hasBatchInterval
     ? Math.max(1, Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!))
     : 1;
@@ -705,45 +938,46 @@ const processBroadcastRun = async (runId: string) => {
       };
       cycleDetails.push(cycleDetail);
 
-      // FIX: Don't accumulate from cycleResult because sentCount/failedCount
-      // are already incremented per-message in the database via prisma updates.
-      // Instead, re-read the actual counts from the database to avoid double-counting
-      // especially after pause/resume scenarios.
-      const freshRun = await prisma.broadcastRun.findUnique({
-        where: { id: run.id },
-        select: { sentCount: true, failedCount: true }
-      });
+      // Re-read actual counts from DB to avoid double-counting
+      const freshRun = await dbRetry(() =>
+        prisma.broadcastRun.findUnique({
+          where: { id: run.id },
+          select: { sentCount: true, failedCount: true }
+        })
+      ).catch(() => null);
       totalSent = freshRun?.sentCount ?? totalSent;
       totalFailed = freshRun?.failedCount ?? totalFailed;
 
       // Handle cycle result
       if (cycleResult.status === "paused") {
-        // Run was paused (FloodWait, PeerFlood, or external)
-        await prisma.broadcastRun.update({
-          where: { id: run.id },
-          data: {
-            sentCount: totalSent,
-            failedCount: totalFailed,
-            completedCycles,
-            cycleDetails: cycleDetails as any,
-            lastCycleFinishedAt: new Date()
-          }
-        });
+        await safeDbWrite(() =>
+          prisma.broadcastRun.update({
+            where: { id: run.id },
+            data: {
+              sentCount: totalSent,
+              failedCount: totalFailed,
+              completedCycles,
+              cycleDetails: cycleDetails as any,
+              lastCycleFinishedAt: new Date()
+            }
+          })
+        );
         return;
       }
 
       if (cycleResult.status === "failed") {
-        // Anti-spam triggered
-        await prisma.broadcastRun.update({
-          where: { id: run.id },
-          data: {
-            sentCount: totalSent,
-            failedCount: totalFailed,
-            completedCycles,
-            cycleDetails: cycleDetails as any,
-            lastCycleFinishedAt: new Date()
-          }
-        });
+        await safeDbWrite(() =>
+          prisma.broadcastRun.update({
+            where: { id: run.id },
+            data: {
+              sentCount: totalSent,
+              failedCount: totalFailed,
+              completedCycles,
+              cycleDetails: cycleDetails as any,
+              lastCycleFinishedAt: new Date()
+            }
+          })
+        );
         return;
       }
 
@@ -757,21 +991,23 @@ const processBroadcastRun = async (runId: string) => {
       const isLastCycle = completedCycles >= safeMaxCycles;
 
       // Update run state
-      await prisma.broadcastRun.update({
-        where: { id: run.id },
-        data: {
-          completedCycles,
-          sentCount: totalSent,
-          failedCount: totalFailed,
-          lastCycleFinishedAt: new Date(),
-          currentCycleNumber: currentCycleNumber,
-          cycleDetails: cycleDetails as any,
-          consecutiveFailCount: 0,
-          reason: isLastCycle
-            ? `Semua ${completedCycles}/${safeMaxCycles} siklus selesai.`
-            : `Siklus ${completedCycles}/${safeMaxCycles} selesai. Menunggu ${run.intervalMinutes} menit...`
-        }
-      });
+      await safeDbWrite(() =>
+        prisma.broadcastRun.update({
+          where: { id: run.id },
+          data: {
+            completedCycles,
+            sentCount: totalSent,
+            failedCount: totalFailed,
+            lastCycleFinishedAt: new Date(),
+            currentCycleNumber: currentCycleNumber,
+            cycleDetails: cycleDetails as any,
+            consecutiveFailCount: 0,
+            reason: isLastCycle
+              ? `Semua ${completedCycles}/${safeMaxCycles} siklus selesai.`
+              : `Siklus ${completedCycles}/${safeMaxCycles} selesai. Menunggu ${run.intervalMinutes} menit...`
+          }
+        })
+      );
 
       if (isLastCycle) {
         await logActivity("worker", `Semua siklus selesai (${completedCycles}/${safeMaxCycles})`, "INFO", {
@@ -785,7 +1021,6 @@ const processBroadcastRun = async (runId: string) => {
       }
 
       // ═══ INTERVAL WAIT ═══
-      // Ensure the full interval passes before starting next cycle
       const cycleFinishedAt = Date.now();
       const nextCycleAt = new Date(cycleFinishedAt + intervalMs);
 
@@ -802,13 +1037,15 @@ const processBroadcastRun = async (runId: string) => {
       }
 
       // Update nextCycleAt for monitoring
-      await prisma.broadcastRun.update({
-        where: { id: run.id },
-        data: {
-          nextCycleAt,
-          reason: `Siklus ${completedCycles}/${safeMaxCycles} selesai. Siklus berikutnya: ${nextCycleAt.toLocaleTimeString("id-ID")} (interval ${run.intervalMinutes} menit)`
-        }
-      });
+      await safeDbWrite(() =>
+        prisma.broadcastRun.update({
+          where: { id: run.id },
+          data: {
+            nextCycleAt,
+            reason: `Siklus ${completedCycles}/${safeMaxCycles} selesai. Siklus berikutnya: ${nextCycleAt.toLocaleTimeString("id-ID")} (interval ${run.intervalMinutes} menit)`
+          }
+        })
+      );
 
       await logActivity("worker", `Menunggu interval ${run.intervalMinutes} menit sebelum siklus ${completedCycles + 1}`, "INFO", {
         runId: run.id,
@@ -818,8 +1055,6 @@ const processBroadcastRun = async (runId: string) => {
       });
 
       // ═══ GUARANTEED INTERVAL WAIT ═══
-      // Wait until the absolute nextCycleAt time, not just relative interval
-      // This ensures interval is fully respected even after pause/resume
       let aborted = false;
       let heartbeatTicks = 0;
       while (Date.now() < nextCycleAt.getTime()) {
@@ -835,17 +1070,18 @@ const processBroadcastRun = async (runId: string) => {
           break;
         }
 
-        // Heartbeat: touch updatedAt every ~60s so recoverStaleRunningRuns
-        // knows this run is alive and waiting for the next cycle, not crashed.
+        // Heartbeat: touch updatedAt every ~60s
         heartbeatTicks++;
         if (heartbeatTicks % 6 === 0) {
-          await prisma.broadcastRun.update({
-            where: { id: run.id },
-            data: {
-              updatedAt: new Date(),
-              reason: `Siklus ${completedCycles}/${safeMaxCycles} selesai. Menunggu siklus berikutnya: ${nextCycleAt.toLocaleTimeString("id-ID")} (sisa ${Math.ceil(remainingWait / 60000)} menit)`
-            }
-          });
+          await safeDbWrite(() =>
+            prisma.broadcastRun.update({
+              where: { id: run.id },
+              data: {
+                updatedAt: new Date(),
+                reason: `Siklus ${completedCycles}/${safeMaxCycles} selesai. Menunggu siklus berikutnya: ${nextCycleAt.toLocaleTimeString("id-ID")} (sisa ${Math.ceil(remainingWait / 60000)} menit)`
+              }
+            })
+          );
         }
       }
 
@@ -858,10 +1094,12 @@ const processBroadcastRun = async (runId: string) => {
       }
 
       // Clear nextCycleAt since we're starting
-      await prisma.broadcastRun.update({
-        where: { id: run.id },
-        data: { nextCycleAt: null }
-      });
+      await safeDbWrite(() =>
+        prisma.broadcastRun.update({
+          where: { id: run.id },
+          data: { nextCycleAt: null }
+        })
+      );
 
       // Anti-spam: Minimum cooldown between cycles
       await sleep(COOLDOWN_AFTER_CYCLE_MS);
@@ -885,15 +1123,16 @@ const processBroadcastRun = async (runId: string) => {
     });
 
     if (cycleResult.status === "paused" || cycleResult.status === "failed") {
-      // Already handled in sendOneCycle
       return;
     }
 
-    // FIX: Read actual counts from DB to avoid double-counting after pause/resume
-    const freshSingleRun = await prisma.broadcastRun.findUnique({
-      where: { id: run.id },
-      select: { sentCount: true, failedCount: true }
-    });
+    // Read actual counts from DB
+    const freshSingleRun = await dbRetry(() =>
+      prisma.broadcastRun.findUnique({
+        where: { id: run.id },
+        select: { sentCount: true, failedCount: true }
+      })
+    ).catch(() => null);
     totalSent = freshSingleRun?.sentCount ?? cycleResult.sent;
     totalFailed = freshSingleRun?.failedCount ?? cycleResult.failed;
     completedCycles = 1;
@@ -911,23 +1150,25 @@ const processBroadcastRun = async (runId: string) => {
   }
 
   // ═══ MARK COMPLETED ═══
-  await prisma.broadcastRun.update({
-    where: { id: run.id },
-    data: {
-      status: RunStatus.COMPLETED,
-      finishedAt: new Date(),
-      sentCount: totalSent,
-      failedCount: totalFailed,
-      pendingCount: 0,
-      completedCycles,
-      currentCycleNumber: completedCycles,
-      lastCycleFinishedAt: new Date(),
-      nextCycleAt: null,
-      consecutiveFailCount: 0,
-      cycleDetails: cycleDetails as any,
-      reason: `Selesai: ${completedCycles} siklus, ${totalSent} terkirim, ${totalFailed} gagal.`
-    }
-  });
+  await dbRetry(() =>
+    prisma.broadcastRun.update({
+      where: { id: run.id },
+      data: {
+        status: RunStatus.COMPLETED,
+        finishedAt: new Date(),
+        sentCount: totalSent,
+        failedCount: totalFailed,
+        pendingCount: 0,
+        completedCycles,
+        currentCycleNumber: completedCycles,
+        lastCycleFinishedAt: new Date(),
+        nextCycleAt: null,
+        consecutiveFailCount: 0,
+        cycleDetails: cycleDetails as any,
+        reason: `Selesai: ${completedCycles} siklus, ${totalSent} terkirim, ${totalFailed} gagal.`
+      }
+    })
+  );
 
   await logActivity("worker", "Broadcast run SELESAI", "INFO", {
     runId: run.id,
@@ -938,22 +1179,25 @@ const processBroadcastRun = async (runId: string) => {
   });
 };
 
+
 // ═══════════════════════════════════════════════════════════
 // RECOVERY & TICK
 // ═══════════════════════════════════════════════════════════
 
 const resumeDuePausedRuns = async () => {
-  const resumed = await prisma.broadcastRun.updateMany({
-    where: {
-      status: RunStatus.PAUSED,
-      pausedUntil: { lte: new Date() }
-    },
-    data: {
-      status: RunStatus.PENDING,
-      pausedUntil: null,
-      reason: "Auto-resume setelah cooldown selesai"
-    }
-  });
+  const resumed = await dbRetry(() =>
+    prisma.broadcastRun.updateMany({
+      where: {
+        status: RunStatus.PAUSED,
+        pausedUntil: { lte: new Date() }
+      },
+      data: {
+        status: RunStatus.PENDING,
+        pausedUntil: null,
+        reason: "Auto-resume setelah cooldown selesai"
+      }
+    })
+  );
 
   if (resumed.count > 0) {
     await logActivity("worker", `${resumed.count} run auto-resumed dari pause`, "INFO", {
@@ -965,20 +1209,20 @@ const resumeDuePausedRuns = async () => {
 const recoverStaleRunningRuns = async () => {
   const staleThreshold = new Date(Date.now() - STALE_RUN_THRESHOLD_MS);
 
-  const staleRuns = await prisma.broadcastRun.findMany({
-    where: {
-      status: RunStatus.RUNNING,
-      updatedAt: { lte: staleThreshold }
-    },
-    select: { id: true, sentCount: true, failedCount: true, completedCycles: true, nextCycleAt: true }
-  });
+  const staleRuns = await dbRetry(() =>
+    prisma.broadcastRun.findMany({
+      where: {
+        status: RunStatus.RUNNING,
+        updatedAt: { lte: staleThreshold }
+      },
+      select: { id: true, sentCount: true, failedCount: true, completedCycles: true, nextCycleAt: true }
+    })
+  );
 
   if (staleRuns.length === 0) return;
 
   for (const stale of staleRuns) {
-    // Skip if the run is waiting for its next cycle interval.
-    // nextCycleAt being set and in the future means the worker is alive
-    // and legitimately sleeping between cycles — NOT a stale/crashed run.
+    // Skip if the run is waiting for its next cycle interval
     if (stale.nextCycleAt && stale.nextCycleAt.getTime() > Date.now()) {
       continue;
     }
@@ -988,13 +1232,15 @@ const recoverStaleRunningRuns = async () => {
       continue;
     }
 
-    await prisma.broadcastRun.update({
-      where: { id: stale.id },
-      data: {
-        status: RunStatus.PENDING,
-        reason: `Auto-recovered: server restart terdeteksi. Melanjutkan dari siklus ${stale.completedCycles}, ${stale.sentCount} terkirim, ${stale.failedCount} gagal.`
-      }
-    });
+    await dbRetry(() =>
+      prisma.broadcastRun.update({
+        where: { id: stale.id },
+        data: {
+          status: RunStatus.PENDING,
+          reason: `Auto-recovered: server restart terdeteksi. Melanjutkan dari siklus ${stale.completedCycles}, ${stale.sentCount} terkirim, ${stale.failedCount} gagal.`
+        }
+      })
+    );
 
     await logActivity("worker", "Recovered stale RUNNING run", "WARN", {
       runId: stale.id,
@@ -1017,13 +1263,15 @@ const processTick = async () => {
     await recoverStaleRunningRuns();
     await resumeDuePausedRuns();
 
-    const pendingRuns = await prisma.broadcastRun.findMany({
-      where: { status: RunStatus.PENDING },
-      orderBy: { createdAt: "asc" }
-    });
+    const pendingRuns = await dbRetry(() =>
+      prisma.broadcastRun.findMany({
+        where: { status: RunStatus.PENDING },
+        orderBy: { createdAt: "asc" }
+      })
+    );
 
     for (const pending of pendingRuns) {
-      // FIX: Skip runs already being processed (prevents race condition / duplicate cycles)
+      // Skip runs already being processed
       if (activeRunIds.has(pending.id)) {
         await logActivity("worker", "Skipping run already in-progress locally", "WARN", {
           runId: pending.id,
@@ -1032,15 +1280,15 @@ const processTick = async () => {
         continue;
       }
 
-      // FIX: Atomically claim the run BEFORE fire-and-forget to prevent
-      // the next tick from picking up the same PENDING run
-      const claimed = await prisma.broadcastRun.updateMany({
-        where: { id: pending.id, status: RunStatus.PENDING },
-        data: { status: RunStatus.RUNNING }
-      });
+      // Atomically claim the run
+      const claimed = await dbRetry(() =>
+        prisma.broadcastRun.updateMany({
+          where: { id: pending.id, status: RunStatus.PENDING },
+          data: { status: RunStatus.RUNNING }
+        })
+      );
 
       if (claimed.count === 0) {
-        // Another tick or worker already claimed this run
         continue;
       }
 
@@ -1052,24 +1300,47 @@ const processTick = async () => {
           await processBroadcastRun(pending.id);
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : "Unknown error";
+          const isDbConnectionError = /can't reach database|timed out fetching.*connection pool|connection reset|ECONNRESET|ETIMEDOUT|socket hang up|connection refused|connection closed/i.test(errorMsg);
+
           await logActivity("worker", "Broadcast run gagal (unexpected error)", "ERROR", {
             runId: pending.id,
             error: errorMsg,
+            isDbError: isDbConnectionError,
             stack: error instanceof Error ? error.stack?.slice(0, 500) : undefined
-          });
+          }).catch(() => {});
 
-          // Mark as failed to prevent infinite retry
-          try {
-            await prisma.broadcastRun.update({
-              where: { id: pending.id },
-              data: {
-                status: RunStatus.FAILED,
-                reason: `Unexpected error: ${errorMsg}`,
-                finishedAt: new Date()
-              }
-            });
-          } catch {
-            // Best effort
+          if (isDbConnectionError) {
+            // Database connection error — DON'T mark as FAILED
+            // Set back to PENDING so it will be retried on next tick
+            try {
+              await dbRetry(() =>
+                prisma.broadcastRun.update({
+                  where: { id: pending.id },
+                  data: {
+                    status: RunStatus.PENDING,
+                    reason: `DB connection lost — auto-retry pada tick berikutnya. Error: ${errorMsg.slice(0, 100)}`
+                  }
+                })
+              );
+            } catch {
+              // If even this fails, the recoverStaleRunningRuns will pick it up
+            }
+          } else {
+            // Non-DB error — mark as failed to prevent infinite retry
+            try {
+              await dbRetry(() =>
+                prisma.broadcastRun.update({
+                  where: { id: pending.id },
+                  data: {
+                    status: RunStatus.FAILED,
+                    reason: `Unexpected error: ${errorMsg}`,
+                    finishedAt: new Date()
+                  }
+                })
+              );
+            } catch {
+              // Best effort
+            }
           }
         } finally {
           activeRunIds.delete(pending.id);
@@ -1087,16 +1358,20 @@ const processTick = async () => {
 
 /**
  * Graceful shutdown: pause all running runs so they can be resumed later.
+ * Also disconnect all pooled Telegram clients.
  */
 const gracefulShutdown = async () => {
   try {
+    // Disconnect all pooled Telegram clients
+    await mtprotoSender.disconnectAll();
+
     const updated = await prisma.broadcastRun.updateMany({
       where: { status: RunStatus.RUNNING },
       data: {
         status: RunStatus.PENDING,
         reason: "Server shutdown — broadcast akan otomatis dilanjutkan saat server nyala kembali."
       }
-    });
+    }).catch(() => ({ count: 0 }));
 
     if (updated.count > 0) {
       await logActivity("worker", `Graceful shutdown: ${updated.count} run di-pause`, "WARN", {

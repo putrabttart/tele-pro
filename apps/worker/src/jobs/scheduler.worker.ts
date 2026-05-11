@@ -1,6 +1,6 @@
 import { RunStatus, ScheduleType, SendMode } from "@prisma/client";
 import { env } from "../config/env";
-import { prisma } from "../config/prisma";
+import { prisma, dbRetry } from "../config/prisma";
 import { logActivity } from "../utils/logger";
 
 const MODE_MARKER_PREFIX = "__TBM_MODE:";
@@ -121,10 +121,12 @@ const shouldTrigger = (schedule: {
 };
 
 const createRunFromSchedule = async (scheduleId: string) => {
-  const schedule = await prisma.schedule.findUnique({
-    where: { id: scheduleId },
-    include: { setting: true }
-  });
+  const schedule = await dbRetry(() =>
+    prisma.schedule.findUnique({
+      where: { id: scheduleId },
+      include: { setting: true }
+    })
+  );
 
   if (!schedule || !schedule.isActive) {
     await logActivity("worker", "Skipping inactive/missing schedule", "WARN", { scheduleId });
@@ -138,14 +140,16 @@ const createRunFromSchedule = async (scheduleId: string) => {
     return;
   }
 
-  const activeRun = await prisma.broadcastRun.findFirst({
-    where: {
-      scheduleId: schedule.id,
-      status: {
-        in: [RunStatus.PENDING, RunStatus.RUNNING]
+  const activeRun = await dbRetry(() =>
+    prisma.broadcastRun.findFirst({
+      where: {
+        scheduleId: schedule.id,
+        status: {
+          in: [RunStatus.PENDING, RunStatus.RUNNING]
+        }
       }
-    }
-  });
+    })
+  );
 
   if (activeRun) {
     return;
@@ -181,18 +185,22 @@ const createRunFromSchedule = async (scheduleId: string) => {
     return;
   }
 
-  await prisma.broadcastRun.create({
-    data: {
-      scheduleId: schedule.id,
-      settingId: schedule.settingId,
-      requestedTemplateIds,
-      status: RunStatus.PENDING
-    }
-  }).then(async (run) => {
-    await prisma.schedule.update({
-      where: { id: schedule.id },
-      data: { lastRunAt: new Date() }
-    });
+  await dbRetry(() =>
+    prisma.broadcastRun.create({
+      data: {
+        scheduleId: schedule.id,
+        settingId: schedule.settingId,
+        requestedTemplateIds,
+        status: RunStatus.PENDING
+      }
+    })
+  ).then(async (run) => {
+    await dbRetry(() =>
+      prisma.schedule.update({
+        where: { id: schedule.id },
+        data: { lastRunAt: new Date() }
+      })
+    );
 
     await logActivity("worker", "Schedule triggered run", "INFO", {
       scheduleId: schedule.id,
@@ -211,17 +219,19 @@ const processTick = async () => {
   processing = true;
   try {
     const now = new Date();
-    const schedules = await prisma.schedule.findMany({
-      where: {
-        isActive: true,
-        type: {
-          in: [ScheduleType.INTERVAL, ScheduleType.CRON]
+    const schedules = await dbRetry(() =>
+      prisma.schedule.findMany({
+        where: {
+          isActive: true,
+          type: {
+            in: [ScheduleType.INTERVAL, ScheduleType.CRON]
+          }
+        },
+        orderBy: {
+          createdAt: "asc"
         }
-      },
-      orderBy: {
-        createdAt: "asc"
-      }
-    });
+      })
+    );
 
     for (const schedule of schedules) {
       if (shouldTrigger(schedule, now)) {

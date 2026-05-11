@@ -247,6 +247,64 @@ class BroadcastService {
       }
     });
   }
+
+  async deleteRun(runId: string) {
+    const run = await prisma.broadcastRun.findUnique({ where: { id: runId } });
+    if (!run) {
+      throw new ApiError(404, "Run not found");
+    }
+
+    // Only allow deleting completed or failed runs
+    if (run.status === "RUNNING" || run.status === "PENDING" || run.status === "PAUSED") {
+      throw new ApiError(400, "Tidak bisa menghapus run yang masih aktif. Hentikan dulu broadcast-nya.");
+    }
+
+    // Delete associated send logs first (cascade would handle this, but explicit is safer)
+    await prisma.sendLog.deleteMany({ where: { runId } });
+
+    // Delete the run
+    await prisma.broadcastRun.delete({ where: { id: runId } });
+
+    await logActivity("broadcast", "Broadcast run deleted", "INFO", {
+      runId,
+      label: run.label,
+      status: run.status
+    });
+
+    return { deleted: true, id: runId };
+  }
+
+  async deleteAllCompletedRuns() {
+    // Get all completed/failed runs
+    const runs = await prisma.broadcastRun.findMany({
+      where: {
+        status: { in: [RunStatus.COMPLETED, RunStatus.FAILED] }
+      },
+      select: { id: true }
+    });
+
+    if (runs.length === 0) {
+      return { deleted: 0 };
+    }
+
+    const runIds = runs.map((r) => r.id);
+
+    // Delete all associated send logs
+    await prisma.sendLog.deleteMany({
+      where: { runId: { in: runIds } }
+    });
+
+    // Delete all runs
+    const result = await prisma.broadcastRun.deleteMany({
+      where: { id: { in: runIds } }
+    });
+
+    await logActivity("broadcast", `Deleted ${result.count} completed/failed runs`, "INFO", {
+      deletedCount: result.count
+    });
+
+    return { deleted: result.count };
+  }
 }
 
 export const broadcastService = new BroadcastService();
