@@ -29,9 +29,6 @@ const PROGRESSIVE_DELAY_MULTIPLIER = 1.5; // Multiply delay by this after each f
 const MAX_PROGRESSIVE_DELAY_MS = 180_000; // Cap at 3 minutes
 const PROGRESSIVE_DELAY_RESET_AFTER = 3; // Reset after N consecutive successes
 
-// Per-account lock: prevents AUTH_KEY_DUPLICATED by ensuring only 1 run uses an account at a time
-const lockedAccountIds = new Set<string>();
-
 // ═══════════════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════════════
@@ -85,10 +82,6 @@ const markRunFailed = async (runId: string, message: string) => {
 
 const selectAccount = async (accountId?: string, currentRunId?: string) => {
   if (accountId) {
-    // If specific account requested, check if it's locked by another run in this worker
-    if (lockedAccountIds.has(accountId)) {
-      return null; // Account is busy locally
-    }
     return dbRetry(() => prisma.telegramAccount.findUnique({ where: { id: accountId } }));
   }
 
@@ -103,11 +96,6 @@ const selectAccount = async (accountId?: string, currentRunId?: string) => {
     })
   );
   const busyAccountIds = new Set(busyRuns.map((r) => r.requestedAccountId!));
-
-  // Also exclude accounts locked locally (in-memory, prevents race condition)
-  for (const lockedId of lockedAccountIds) {
-    busyAccountIds.add(lockedId);
-  }
 
   const candidates = await dbRetry(() =>
     prisma.telegramAccount.findMany({
@@ -825,20 +813,6 @@ const processBroadcastRun = async (runId: string) => {
     );
   }
 
-  // Acquire local account lock to prevent AUTH_KEY_DUPLICATED
-  if (lockedAccountIds.has(account.id)) {
-    // Account is already in use by another run in this worker — put back to pending
-    await safeDbWrite(() =>
-      prisma.broadcastRun.update({
-        where: { id: run.id },
-        data: { status: RunStatus.PENDING, reason: "Akun sedang digunakan run lain, menunggu giliran..." }
-      })
-    );
-    return;
-  }
-  lockedAccountIds.add(account.id);
-
-  try {
   // Parse payload
   const payload = parseRunPayload(run.requestedTemplateIds);
   const sendMode = payload?.mode ?? run.setting.sendMode;
@@ -1213,11 +1187,6 @@ const processBroadcastRun = async (runId: string) => {
     completedCycles,
     totalDuration: formatDuration(Date.now() - broadcastStartTime)
   });
-
-  } finally {
-    // Always release the account lock
-    lockedAccountIds.delete(account.id);
-  }
 };
 
 
