@@ -83,8 +83,8 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
     headers
   });
 
-  // Auto-refresh on 401
-  if (response.status === 401) {
+  // Auto-refresh on 401 (skip for auth endpoints — they handle their own 401)
+  if (response.status === 401 && !path.startsWith("/api/auth/")) {
     const refreshToken = getRefreshToken();
     if (refreshToken) {
       try {
