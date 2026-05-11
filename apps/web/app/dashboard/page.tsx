@@ -1778,6 +1778,32 @@ export default function DashboardPage() {
     });
   };
 
+  const handleDeleteRun = async (id: string) => {
+    const confirmed = window.confirm("Yakin ingin menghapus riwayat run ini? Data log pengiriman juga akan dihapus permanen.");
+    if (!confirmed) return;
+
+    await withBusyAction(`run-delete-${id}`, async () => {
+      await apiFetch(`/api/broadcast/runs/${id}`, {
+        method: "DELETE"
+      });
+
+      await loadAll();
+    });
+  };
+
+  const handleDeleteAllRuns = async () => {
+    const confirmed = window.confirm("Yakin ingin menghapus SEMUA riwayat run yang sudah selesai/gagal? Tindakan ini tidak bisa dibatalkan.");
+    if (!confirmed) return;
+
+    await withBusyAction("run-delete-all", async () => {
+      await apiFetch(`/api/broadcast/runs`, {
+        method: "DELETE"
+      });
+
+      await loadAll();
+    });
+  };
+
   const handleScheduleAction = async (id: string, action: "trigger" | "toggle", isActive?: boolean) => {
     await withBusyAction(`schedule-${action}-${id}`, async () => {
       if (action === "trigger") {
@@ -3246,6 +3272,15 @@ export default function DashboardPage() {
               <p className="tbm-panel-desc mb-0">Riwayat semua broadcast yang pernah dijalankan.</p>
             </div>
             <div className="d-flex align-items-center gap-2">
+              <button
+                className="btn btn-sm btn-outline-danger"
+                type="button"
+                onClick={() => void handleDeleteAllRuns()}
+                disabled={isBusy("run-delete-all") || syncing || runs.filter((r) => ["COMPLETED", "FAILED"].includes(r.status)).length === 0}
+                title="Hapus semua riwayat yang sudah selesai/gagal"
+              >
+                <i className="bi bi-trash me-1"></i>Hapus Semua
+              </button>
               <span className="tbm-pagination-info">{runs.length} total</span>
               <select
                 className="tbm-perpage-select"
@@ -3356,7 +3391,9 @@ export default function DashboardPage() {
                               </button>
                             ) : null}
                             {["COMPLETED", "FAILED"].includes(run.status) ? (
-                              <span className="text-secondary small">-</span>
+                              <button className="btn btn-sm btn-outline-danger" type="button" onClick={() => void handleDeleteRun(run.id)} disabled={isBusy(`run-delete-${run.id}`) || syncing} title="Hapus riwayat">
+                                <i className="bi bi-trash"></i>
+                              </button>
                             ) : null}
                           </div>
                         </td>
