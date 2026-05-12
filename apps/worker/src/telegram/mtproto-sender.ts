@@ -6,7 +6,7 @@ import { decryptText } from "../utils/crypto";
 import { sleep } from "../utils/sleep";
 
 const CLIENT_CONNECT_TIMEOUT_MS = 30_000;
-const MAX_SEND_RETRIES = 4;
+const MAX_SEND_RETRIES = 5;
 const RETRY_BASE_DELAY_MS = 3_000;
 
 // ═══════════════════════════════════════════════════════════
@@ -27,6 +27,7 @@ export const classifyError = (errorCode?: string): ErrorSeverity => {
     case "CHAT_RESTRICTED":
       return "skip";
     case "FLOOD_WAIT":
+      return "skip";
     case "SLOWMODE_WAIT":
     case "NETWORK_ERROR":
     case "CONNECTION_FAILED":
@@ -194,13 +195,14 @@ export class MtprotoSender {
         return { ...result, retriesUsed };
       }
 
-      // FLOOD_WAIT: Auto-wait if <= 120s
+      // FLOOD_WAIT: Auto-wait if short (<=120s), then retry the SAME group
       if (result.errorCode === "FLOOD_WAIT" && result.floodWaitSeconds) {
-        if (result.floodWaitSeconds <= 120) {
-          await sleep((result.floodWaitSeconds + 5) * 1000);
+        if (result.floodWaitSeconds <= 120 && attempt < MAX_SEND_RETRIES) {
+          await sleep((result.floodWaitSeconds + 2) * 1000);
           retriesUsed++;
           continue;
         }
+        // Too long (>120s) or out of retries — return to caller
         return { ...result, retriesUsed };
       }
 

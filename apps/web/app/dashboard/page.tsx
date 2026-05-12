@@ -378,7 +378,7 @@ const parseSendLogError = (errorCode: string | null, errorMessage: string | null
   }
 
   if (code === "FLOOD_WAIT") {
-    const match = msg.match(/FLOOD_WAIT_(\d+)/i);
+    const match = msg.match(/FLOOD_WAIT_(\d+)/i) ?? msg.match(/tunggu (\d+)/i) ?? msg.match(/wait of (\d+)/i) ?? msg.match(/(\d+)\s*(?:detik|seconds|s\b)/i);
     const seconds = match ? match[1] : "?";
     return {
       label: `Rate Limit (${seconds} detik)`,

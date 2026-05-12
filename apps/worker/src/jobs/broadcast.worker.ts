@@ -17,7 +17,7 @@ const FORWARD_SOURCE_MARKER_PREFIX = "__TBM_FORWARD_SOURCE:";
 const FORWARD_MESSAGE_MARKER_PREFIX = "__TBM_FORWARD_MESSAGE_ID:";
 
 // Anti-spam protection constants (IMPROVED)
-const MAX_CONSECUTIVE_ACCOUNT_FAILS = 5; // Only count ACCOUNT-level fails (not group-level skips)
+const MAX_CONSECUTIVE_ACCOUNT_FAILS = 10; // Pause only after 10 consecutive account-level fails
 const MAX_TOTAL_FAIL_RATIO = 0.85; // Pause if >85% of messages fail in a cycle
 const MIN_MESSAGES_FOR_RATIO_CHECK = 10; // Only check ratio after N messages
 const COOLDOWN_AFTER_CYCLE_MS = 5_000; // 5s cooldown between cycles (minimum)
@@ -258,6 +258,7 @@ const sendOneCycle = async (params: {
   let cycleSkipped = 0;
   let consecutiveAccountFails = 0; // Only count account-level errors
   let consecutiveSuccesses = 0;
+  let consecutiveFloodWaits = 0; // Count FLOOD_WAITs — pause after 10
   let currentDelayMultiplier = 1;
 
   const { runId, cycleNumber, setting, allGroups } = params;
@@ -487,8 +488,9 @@ const sendOneCycle = async (params: {
 
       if (sendResult.ok) {
         cycleSent += 1;
-        consecutiveAccountFails = 0; // Reset account fails on success
+        consecutiveAccountFails = 0;
         consecutiveSuccesses += 1;
+        consecutiveFloodWaits = 0; // Reset flood counter on success
 
         // Reset progressive delay after sustained success
         if (consecutiveSuccesses >= PROGRESSIVE_DELAY_RESET_AFTER) {
@@ -523,6 +525,53 @@ const sendOneCycle = async (params: {
           cycleSkipped += 1;
           cycleFailed += 1;
           consecutiveSuccesses = 0;
+
+          // FLOOD_WAIT special handling: skip group but count consecutive occurrences
+          if (sendResult.errorCode === "FLOOD_WAIT") {
+            consecutiveFloodWaits += 1;
+
+            // After 10 consecutive FLOOD_WAITs, pause the run
+            if (consecutiveFloodWaits >= 10) {
+              const waitSeconds = sendResult.floodWaitSeconds ?? 60;
+              const pausedUntil = new Date(Date.now() + Math.min(waitSeconds, 3600) * 1000);
+
+              await safeDbWrite(() =>
+                prisma.sendLog.create({
+                  data: { runId, groupId: group.id, accountId: params.accountId, cycleNumber, status: SendStatus.SKIPPED, errorCode: sendResult.errorCode, errorMessage: sendResult.errorMessage }
+                })
+              );
+
+              await safeDbWrite(() =>
+                prisma.broadcastRun.update({
+                  where: { id: runId },
+                  data: {
+                    status: RunStatus.PAUSED,
+                    reason: `Siklus ${cycleNumber}: 10x FLOOD_WAIT berturut-turut — auto-pause ${Math.min(waitSeconds, 3600)}s`,
+                    pausedUntil,
+                    failedCount: { increment: 1 },
+                    pendingCount: { decrement: 1 }
+                  }
+                })
+              );
+
+              await logActivity("worker", `Siklus ${cycleNumber}: 10x FLOOD_WAIT — auto-pause`, "WARN", {
+                runId, cycleNumber, consecutiveFloodWaits, cycleSent, cycleFailed,
+                pausedUntil: pausedUntil.toISOString()
+              });
+
+              return {
+                status: "paused",
+                sent: cycleSent,
+                failed: cycleFailed,
+                skipped: cycleSkipped,
+                durationMs: Date.now() - cycleStartTime,
+                failReason: `10x FLOOD_WAIT — auto-pause`
+              };
+            }
+          } else {
+            // Non-FLOOD_WAIT skip resets the flood counter
+            consecutiveFloodWaits = 0;
+          }
 
           await safeDbWrite(() =>
             prisma.sendLog.create({
@@ -676,40 +725,8 @@ const sendOneCycle = async (params: {
           })
         );
 
-        // Handle FLOOD_WAIT that was too long for auto-wait (>120s)
-        if (setting.autoPauseOnLimit && sendResult.errorCode === "FLOOD_WAIT" && sendResult.floodWaitSeconds) {
-          const pausedUntil = new Date(Date.now() + (sendResult.floodWaitSeconds + 10) * 1000);
-
-          await safeDbWrite(() =>
-            prisma.broadcastRun.update({
-              where: { id: runId },
-              data: {
-                status: RunStatus.PAUSED,
-                reason: `Siklus ${cycleNumber}: FloodWait ${sendResult.floodWaitSeconds}s (terlalu lama) - auto-resume setelah cooldown`,
-                pausedUntil,
-                completedCycles: cycleNumber - 1
-              }
-            })
-          );
-
-          await logActivity("worker", `Siklus ${cycleNumber}: FLOOD_WAIT ${sendResult.floodWaitSeconds}s (>120s) - auto pause`, "WARN", {
-            runId,
-            cycleNumber,
-            floodWaitSeconds: sendResult.floodWaitSeconds,
-            cycleSent,
-            cycleFailed,
-            pausedUntil: pausedUntil.toISOString()
-          });
-
-          return {
-            status: "paused",
-            sent: cycleSent,
-            failed: cycleFailed,
-            skipped: cycleSkipped,
-            durationMs: Date.now() - cycleStartTime,
-            failReason: `FloodWait ${sendResult.floodWaitSeconds}s (auto-resume scheduled)`
-          };
-        }
+        // Handle remaining wait_retry errors (NETWORK, CONNECTION, etc.)
+        // FLOOD_WAIT is now handled in the "skip" block above
       }
 
       pendingCount -= 1;
