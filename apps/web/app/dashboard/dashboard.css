@@ -2376,3 +2376,500 @@
 .tbm-log-session-filter label {
   white-space: nowrap;
 }
+
+
+/* ════════════════════════════════════════════════════════════
+   COMPREHENSIVE RESPONSIVE OVERRIDES
+   Mobile-first improvements without changing component logic
+   ════════════════════════════════════════════════════════════ */
+
+/* ── Tablet (≤1023px) ── */
+@media (max-width: 1023px) {
+  .tbm-page-container {
+    padding: 16px;
+  }
+
+  .tbm-hero-title {
+    font-size: 1.4rem;
+  }
+
+  .tbm-hero-subtitle {
+    font-size: 0.85rem;
+  }
+
+  .tbm-hero-pills {
+    gap: 6px;
+  }
+
+  .tbm-hero-pill {
+    font-size: 0.7rem;
+    padding: 3px 8px;
+  }
+
+  /* Sidebar slides in as overlay on tablet/mobile */
+  .tbm-sidebar {
+    width: 260px;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.2);
+  }
+
+  /* All multi-column grids collapse */
+  .tbm-analytics-grid,
+  .tbm-insight-grid,
+  .tbm-flow-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Tables become more compact */
+  .tbm-panel .table th,
+  .tbm-panel .table td {
+    padding: 6px 8px;
+    font-size: 0.78rem;
+  }
+
+  /* Section headers wrap properly */
+  .tbm-panel .d-flex.justify-content-between {
+    align-items: stretch;
+  }
+}
+
+/* ── Mobile (≤768px) ── */
+@media (max-width: 768px) {
+  .tbm-page-container {
+    padding: 12px;
+  }
+
+  .tbm-content-stack {
+    gap: 12px;
+  }
+
+  /* Hero compact on mobile */
+  .tbm-hero {
+    padding: 14px;
+  }
+
+  .tbm-hero-title {
+    font-size: 1.2rem;
+  }
+
+  .tbm-hero-breadcrumb {
+    font-size: 0.7rem;
+  }
+
+  .tbm-hero-subtitle {
+    font-size: 0.8rem;
+  }
+
+  /* Topbar compact */
+  .tbm-topbar-inner {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+
+  .tbm-topbar-btn {
+    width: 32px;
+    height: 32px;
+  }
+
+  .tbm-auto-refresh-controls {
+    gap: 4px;
+  }
+
+  .tbm-refresh-interval-select {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+  }
+
+  /* Hide non-essential UI on mobile */
+  .tbm-topbar-search {
+    display: none;
+  }
+
+  .tbm-topbar-user {
+    display: none !important;
+  }
+
+  /* Panel padding compact */
+  .tbm-panel {
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .tbm-panel-title {
+    font-size: 0.95rem;
+  }
+
+  .tbm-panel-desc {
+    font-size: 0.78rem;
+  }
+
+  /* KPI cards single column */
+  .tbm-kpi-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  /* Tables: horizontal scroll without breaking layout */
+  .table-responsive {
+    margin: 0 -14px;
+    width: calc(100% + 28px);
+  }
+
+  .tbm-panel .table {
+    font-size: 0.75rem;
+  }
+
+  .tbm-panel .table th,
+  .tbm-panel .table td {
+    padding: 5px 6px;
+    white-space: nowrap;
+  }
+
+  /* Buttons in tables */
+  .tbm-panel .table .btn-sm {
+    padding: 2px 6px;
+    font-size: 0.7rem;
+  }
+
+  /* Form rows stack */
+  .tbm-panel .d-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Form fields full width */
+  .tbm-panel .form-control,
+  .tbm-panel .form-select {
+    font-size: 0.85rem;
+  }
+
+  /* Subpanels stack */
+  .tbm-subpanel {
+    padding: 14px;
+  }
+
+  /* Header action groups wrap */
+  .d-flex.justify-content-between.align-items-center.flex-wrap {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 10px;
+  }
+
+  .d-flex.justify-content-between.align-items-center.flex-wrap > div {
+    width: 100%;
+  }
+
+  .d-flex.justify-content-between.align-items-center.flex-wrap > div.d-flex {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  /* Pagination compact */
+  .tbm-pagination {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .tbm-pagination-btn {
+    width: 28px;
+    height: 28px;
+  }
+
+  .tbm-pagination-info {
+    font-size: 0.7rem;
+  }
+
+  .tbm-perpage-select {
+    font-size: 0.75rem;
+    padding: 4px 8px;
+  }
+
+  /* Charts: container scrollable */
+  .tbm-chart-panel {
+    overflow-x: auto;
+  }
+
+  .tbm-chart-svg {
+    min-width: 480px;
+  }
+
+  /* Weekly bars tighter */
+  .tbm-weekly-bars {
+    gap: 6px;
+  }
+
+  /* Date filter wraps */
+  .tbm-date-filter-row {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 8px;
+  }
+
+  .tbm-date-input {
+    width: 100% !important;
+  }
+
+  /* Log filter row wraps */
+  .tbm-log-session-filter {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 8px;
+  }
+
+  .tbm-log-session-filter select {
+    width: 100% !important;
+  }
+
+  /* Monitor cards full width */
+  .tbm-monitor-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .tbm-monitor-card {
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  /* Failure detail header stacks */
+  .tbm-failure-header {
+    padding: 14px;
+    flex-direction: column;
+    align-items: flex-start !important;
+    text-align: left;
+  }
+
+  /* Reason detail truncation */
+  .tbm-reason-detail {
+    max-width: 100%;
+  }
+
+  /* Error explanation full width */
+  .tbm-error-explain {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  /* Alerts compact */
+  .tbm-alert {
+    padding: 8px 12px;
+    font-size: 0.8rem;
+  }
+
+  /* Hero pills wrap nicely */
+  .tbm-hero-pills {
+    flex-wrap: wrap;
+  }
+}
+
+/* ── Small mobile (≤480px) ── */
+@media (max-width: 480px) {
+  .tbm-page-container {
+    padding: 10px;
+  }
+
+  .tbm-hero-title {
+    font-size: 1.05rem;
+  }
+
+  .tbm-panel {
+    padding: 12px;
+    border-radius: 12px;
+  }
+
+  .tbm-panel-title {
+    font-size: 0.88rem;
+  }
+
+  /* Sidebar narrower */
+  .tbm-sidebar {
+    width: 240px;
+  }
+
+  /* Brand smaller */
+  .tbm-brand-text strong {
+    font-size: 0.95rem;
+  }
+
+  .tbm-brand-text small {
+    font-size: 0.7rem;
+  }
+
+  /* Topbar minimal */
+  .tbm-topbar-inner {
+    padding: 8px 10px;
+  }
+
+  .tbm-topbar-btn {
+    width: 28px;
+    height: 28px;
+    font-size: 0.85rem;
+  }
+
+  /* Hide refresh interval select on tiny screens */
+  .tbm-refresh-interval-select {
+    display: none;
+  }
+
+  /* KPI compact */
+  .tbm-kpi-card {
+    padding: 12px;
+  }
+
+  .tbm-kpi-value {
+    font-size: 1.4rem;
+  }
+
+  .tbm-kpi-label {
+    font-size: 0.7rem;
+  }
+
+  /* Tables: extreme compact */
+  .tbm-panel .table {
+    font-size: 0.7rem;
+  }
+
+  .tbm-panel .table th,
+  .tbm-panel .table td {
+    padding: 4px 5px;
+  }
+
+  /* Hide less important columns on very small screens */
+  .tbm-panel .table .d-none-mobile {
+    display: none;
+  }
+
+  /* Buttons icon-only on small screens */
+  .tbm-panel .btn-sm i + span,
+  .tbm-panel .btn-sm.text-hide-sm {
+    display: none;
+  }
+
+  /* Badge compact */
+  .badge {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+  }
+
+  /* Form buttons full width */
+  .tbm-panel form .btn-primary,
+  .tbm-panel form .btn-success {
+    width: 100%;
+    margin-top: 4px;
+  }
+
+  /* Chart min width smaller */
+  .tbm-chart-svg {
+    min-width: 360px;
+  }
+
+  /* Weekly bars smaller */
+  .tbm-weekly-bars {
+    height: 140px;
+  }
+
+  /* Alerts more compact */
+  .tbm-alert {
+    padding: 7px 10px;
+    font-size: 0.75rem;
+  }
+
+  /* Hero pills horizontally scrollable */
+  .tbm-hero-pills {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    margin-right: -10px;
+  }
+
+  .tbm-hero-pills::-webkit-scrollbar {
+    height: 0;
+  }
+
+  /* Pagination centered with wrap */
+  .tbm-pagination {
+    justify-content: center;
+  }
+}
+
+/* ── Touch device improvements ── */
+@media (hover: none) and (pointer: coarse) {
+  /* Larger tap targets */
+  .tbm-nav-item {
+    min-height: 44px;
+  }
+
+  .tbm-pagination-btn,
+  .tbm-topbar-btn {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  .tbm-panel .btn-sm {
+    min-height: 32px;
+  }
+
+  /* Disable hover effects */
+  .tbm-monitor-card:hover,
+  .tbm-panel:hover {
+    transform: none;
+  }
+}
+
+/* ── Landscape phone ── */
+@media (max-width: 896px) and (orientation: landscape) {
+  .tbm-sidebar {
+    width: 220px;
+  }
+
+  .tbm-page-container {
+    padding: 12px 16px;
+  }
+
+  .tbm-hero {
+    padding: 10px 14px;
+  }
+
+  .tbm-hero-title {
+    font-size: 1.1rem;
+    margin-bottom: 2px;
+  }
+
+  .tbm-hero-subtitle {
+    font-size: 0.75rem;
+    margin-bottom: 6px;
+  }
+}
+
+/* ── Reduce motion preference ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Print styles ── */
+@media print {
+  .tbm-sidebar,
+  .tbm-topbar,
+  .tbm-pagination,
+  .tbm-hero-pills,
+  .btn,
+  button {
+    display: none !important;
+  }
+
+  .tbm-page-container {
+    padding: 0;
+    max-width: 100%;
+  }
+
+  .tbm-panel {
+    border: 1px solid #ddd;
+    box-shadow: none;
+    page-break-inside: avoid;
+  }
+}

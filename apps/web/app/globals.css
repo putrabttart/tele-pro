@@ -418,8 +418,63 @@ button {
   }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 768px) {
+  .tbm-login-form-side {
+    padding: 20px 16px;
+  }
+
+  .tbm-login-topbar {
+    padding-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .tbm-login-title {
+    font-size: 1.5rem;
+  }
+
+  .tbm-login-desc {
+    font-size: 0.85rem;
+    margin-bottom: 20px;
+  }
+
   .tbm-login-card {
-    padding: 24px 20px;
+    padding: 24px 18px;
+  }
+}
+
+@media (max-width: 480px) {
+  .tbm-login-form-side {
+    padding: 16px 12px;
+  }
+
+  .tbm-login-card {
+    padding: 20px 16px;
+  }
+
+  .tbm-login-card .tbm-field-input {
+    height: 42px;
+    font-size: 0.85rem;
+  }
+
+  .tbm-login-btn {
+    height: 44px;
+    font-size: 0.85rem;
+  }
+
+  .tbm-login-title {
+    font-size: 1.3rem;
+  }
+
+  .tbm-login-eyebrow {
+    font-size: 0.65rem;
+  }
+}
+
+/* Touch devices: larger tap targets */
+@media (hover: none) and (pointer: coarse) {
+  .tbm-login-card .tbm-field-input,
+  .tbm-login-btn {
+    min-height: 44px;
   }
 }
