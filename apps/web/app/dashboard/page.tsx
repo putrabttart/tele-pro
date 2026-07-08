@@ -4,6 +4,12 @@ import "./dashboard.css";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import {
+  DashboardShell,
+  type DashboardSectionGroup,
+  type DashboardSectionId,
+  type DashboardSectionMeta
+} from "../../components/dashboard-shell";
 import { apiBaseUrl, apiFetch, clearToken, getToken } from "../../lib/api";
 import type {
   BusyAccountInfo,
@@ -17,20 +23,7 @@ import type {
   TemplateItem
 } from "../../types";
 
-type DashboardSectionId =
-  | "overview"
-  | "session"
-  | "groups"
-  | "templates"
-  | "broadcast"
-  | "monitoring";
-
-const sectionMeta: Array<{
-  id: DashboardSectionId;
-  label: string;
-  subtitle: string;
-  icon: string;
-}> = [
+const sectionMeta: DashboardSectionMeta[] = [
   {
     id: "overview",
     label: "Overview",
@@ -69,10 +62,7 @@ const sectionMeta: Array<{
   }
 ];
 
-const sectionGroups: Array<{
-  label: string;
-  items: DashboardSectionId[];
-}> = [
+const sectionGroups: DashboardSectionGroup[] = [
   {
     label: "Menu",
     items: ["overview", "session", "groups"]
@@ -1470,18 +1460,6 @@ export default function DashboardPage() {
     });
   };
 
-  useEffect(() => {
-    if (activeSection !== "groups") {
-      return;
-    }
-    if (!groupAccountId) {
-      return;
-    }
-
-    void handleSyncGroups(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSection, groupAccountId]);
-
   const handleBatchAddUsernames = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
@@ -1598,6 +1576,28 @@ export default function DashboardPage() {
         body: JSON.stringify({ isActive: !isActive })
       });
 
+      await loadAll();
+    });
+  };
+
+  const handleBatchToggleGroups = async (isActive: boolean) => {
+    const targetGroups = filteredGroups.filter((group) => group.isActive !== isActive);
+
+    if (!targetGroups.length) {
+      setNotice(isActive ? "Semua group di filter ini sudah aktif" : "Semua group di filter ini sudah nonaktif");
+      return;
+    }
+
+    await withBusyAction(isActive ? "group-batch-activate" : "group-batch-deactivate", async () => {
+      const result = await apiFetch<{ count: number }>("/api/groups/batch-status", {
+        method: "PATCH",
+        body: JSON.stringify({
+          groupIds: targetGroups.map((group) => group.id),
+          isActive
+        })
+      });
+
+      setNotice(`${result.count} group ${isActive ? "diaktifkan" : "dinonaktifkan"}${groupSearch ? " dari hasil filter" : ""}`);
       await loadAll();
     });
   };
@@ -2191,7 +2191,7 @@ export default function DashboardPage() {
           </form>
         </div>
 
-        <div className="table-responsive mt-3">
+        <div className="table-responsive tbm-mobile-table mt-3">
           <table className="table table-sm align-middle table-bordered">
             <thead className="table-light">
               <tr>
@@ -2205,14 +2205,14 @@ export default function DashboardPage() {
               {accounts.length ? (
                 accounts.map((acc) => (
                   <tr key={acc.id}>
-                    <td>{acc.label}</td>
-                    <td>{acc.phone}</td>
-                    <td>
+                    <td data-label="Label">{acc.label}</td>
+                    <td data-label="Phone">{acc.phone}</td>
+                    <td data-label="Status">
                       <span className={`badge ${acc.status === "CONNECTED" ? "tbm-status-success" : "tbm-status-warning"}`}>
                         {acc.status}
                       </span>
                     </td>
-                    <td>
+                    <td data-label="Action">
                       {acc.status === "CONNECTED" ? (
                         <button
                           className="btn btn-sm btn-outline-danger"
@@ -2246,6 +2246,9 @@ export default function DashboardPage() {
       : groupSearch
         ? "Tidak ada group yang cocok dengan pencarian."
         : "Belum ada group. Tambahkan group menggunakan form di atas.";
+    const filteredActiveCount = filteredGroups.filter((group) => group.isActive).length;
+    const filteredInactiveCount = filteredGroups.length - filteredActiveCount;
+    const batchScopeLabel = groupSearch ? "hasil filter" : "semua group";
 
     return (
       <>
@@ -2412,6 +2415,24 @@ export default function DashboardPage() {
               </p>
             </div>
             <div className="d-flex align-items-center gap-2">
+              <button
+                className="btn btn-sm btn-outline-success"
+                type="button"
+                onClick={() => void handleBatchToggleGroups(true)}
+                disabled={isBusy("group-batch-activate") || syncing || !filteredInactiveCount}
+                title={`Aktifkan ${batchScopeLabel} yang nonaktif`}
+              >
+                {isBusy("group-batch-activate") ? "Aktifkan..." : `Aktifkan ${filteredInactiveCount}`}
+              </button>
+              <button
+                className="btn btn-sm btn-outline-warning"
+                type="button"
+                onClick={() => void handleBatchToggleGroups(false)}
+                disabled={isBusy("group-batch-deactivate") || syncing || !filteredActiveCount}
+                title={`Nonaktifkan ${batchScopeLabel} yang aktif`}
+              >
+                {isBusy("group-batch-deactivate") ? "Nonaktifkan..." : `Nonaktifkan ${filteredActiveCount}`}
+              </button>
               <div className="tbm-table-search">
                 <i className="bi bi-search tbm-table-search-icon"></i>
                 <input
@@ -2445,7 +2466,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="table-responsive mt-3">
+          <div className="table-responsive tbm-mobile-table mt-3">
             <table className="table table-sm table-bordered align-middle">
               <thead className="table-light">
                 <tr>
@@ -2462,14 +2483,14 @@ export default function DashboardPage() {
 
                     return (
                       <tr key={group.id}>
-                        <td>{group.username ? `@${group.username}` : group.telegramId ?? "-"}</td>
-                        <td className="small">{group.title ?? "-"}</td>
-                        <td>
+                        <td data-label="Group">{group.username ? `@${group.username}` : group.telegramId ?? "-"}</td>
+                        <td data-label="Title" className="small">{group.title ?? "-"}</td>
+                        <td data-label="Status">
                           <span className={`badge ${group.isActive ? "tbm-status-success" : "tbm-status-warning"}`}>
                             {group.isActive ? "ACTIVE" : "INACTIVE"}
                           </span>
                         </td>
-                        <td>
+                        <td data-label="Action">
                           <button
                             className="btn btn-sm btn-outline-secondary"
                             type="button"
@@ -3346,7 +3367,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="table-responsive mt-3">
+          <div className="table-responsive tbm-mobile-table mt-3">
             <table className="table table-sm table-bordered align-middle">
               <thead className="table-light">
                 <tr>
@@ -3373,21 +3394,21 @@ export default function DashboardPage() {
 
                     return (
                       <tr key={run.id}>
-                        <td>
+                        <td data-label="Nama">
                           <div className="fw-semibold" style={{ fontSize: "0.85rem" }}>{run.label || run.id.slice(0, 10)}</div>
                           <div className="text-secondary" style={{ fontSize: "0.72rem" }}>{new Date(run.createdAt).toLocaleString("id-ID")}</div>
                         </td>
-                        <td>
+                        <td data-label="Mode / Pesan">
                           <span className="badge tbm-status-neutral me-1">{info.mode}</span>
                           <span className="small text-secondary" style={{ maxWidth: 180, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "middle" }} title={info.detail}>{info.detail}</span>
                         </td>
-                        <td>
+                        <td data-label="Akun">
                           <span className="small" title={accountLabel ?? "Auto-select"}>
                             <i className="bi bi-person-circle me-1"></i>
                             {accountLabel ? accountLabel : <em className="text-secondary">Auto</em>}
                           </span>
                         </td>
-                        <td>
+                        <td data-label="Status">
                           <span className={runStatusBadgeClass(run.status)}>
                             <i className={`${statusInfo.icon} me-1`}></i>
                             {statusInfo.label}
@@ -3396,9 +3417,9 @@ export default function DashboardPage() {
                             <div className="text-secondary" style={{ fontSize: "0.7rem", marginTop: 2 }}>{statusInfo.sublabel}</div>
                           ) : null}
                         </td>
-                        <td>{run.sentCount}</td>
-                        <td>{run.failedCount}</td>
-                        <td>
+                        <td data-label="Sent">{run.sentCount}</td>
+                        <td data-label="Failed">{run.failedCount}</td>
+                        <td data-label="Info">
                           {hasBatch ? (
                             <span className="small">
                               <i className="bi bi-arrow-repeat me-1"></i>
@@ -3415,7 +3436,7 @@ export default function DashboardPage() {
                             </div>
                           ) : null}
                         </td>
-                        <td>
+                        <td data-label="Action">
                           <div className="d-flex gap-1 flex-wrap">
                             {run.status === "RUNNING" ? (
                               <>
@@ -3615,7 +3636,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="table-responsive mt-3">
+          <div className="table-responsive tbm-mobile-table mt-3">
             <table className="table table-sm table-bordered align-middle">
               <thead className="table-light">
                 <tr>
@@ -3636,7 +3657,7 @@ export default function DashboardPage() {
                     return (
                       <tr key={log.id}>
                         {logRunFilter === "ALL" ? (
-                          <td>
+                          <td data-label="Sesi">
                             <button
                               type="button"
                               className="btn btn-link btn-sm p-0 text-start"
@@ -3648,21 +3669,21 @@ export default function DashboardPage() {
                             </button>
                           </td>
                         ) : null}
-                        <td>{log.group.username ? `@${log.group.username}` : log.group.telegramId ?? "-"}</td>
-                        <td>
+                        <td data-label="Group">{log.group.username ? `@${log.group.username}` : log.group.telegramId ?? "-"}</td>
+                        <td data-label="Akun">
                           <span className="small">
                             {log.account ? `${log.account.label}` : <span className="text-secondary">-</span>}
                           </span>
                         </td>
-                        <td><span className={statusBadgeClass(log.status)}>{log.status}</span></td>
-                        <td>
+                        <td data-label="Status"><span className={statusBadgeClass(log.status)}>{log.status}</span></td>
+                        <td data-label="Error">
                           {parsed ? (
                             <span className="tbm-error-label" title={log.errorCode ?? undefined}>{parsed.label}</span>
                           ) : (
                             <span className="text-secondary">-</span>
                           )}
                         </td>
-                        <td>
+                        <td data-label="Penjelasan">
                           {parsed ? (
                             <div className="tbm-error-explain" title={log.errorMessage ?? undefined}>
                               <span>{parsed.explanation}</span>
@@ -3671,7 +3692,7 @@ export default function DashboardPage() {
                             <span className="text-secondary">-</span>
                           )}
                         </td>
-                        <td className="small">{new Date(log.timestamp).toLocaleString("id-ID")}</td>
+                        <td data-label="Time" className="small">{new Date(log.timestamp).toLocaleString("id-ID")}</td>
                       </tr>
                     );
                   })
@@ -3760,224 +3781,38 @@ export default function DashboardPage() {
   }
 
   return (
-    <main className="tbm-admin-page">
-      <div className="tbm-layout">
-        <div
-          className={`tbm-sidebar-overlay ${sidebarOpen ? "tbm-sidebar-overlay-visible" : ""}`}
-          onClick={() => setSidebarOpen(false)}
-          aria-hidden="true"
-        ></div>
-
-        <aside
-          className={`tbm-sidebar ${sidebarOpen ? "tbm-sidebar-open" : ""}`}
-        >
-          <div className="tbm-sidebar-header">
-            <a href="#" onClick={(event) => event.preventDefault()} className="tbm-brand-link">
-              <div className="tbm-brand-icon">
-                <i className="bi bi-broadcast"></i>
-              </div>
-              <div className="tbm-brand-text">
-                <strong>BLAST TELE</strong>
-                <small>Broadcast Manager</small>
-              </div>
-            </a>
-          </div>
-
-          <div className="tbm-sidebar-content">
-            <nav className="tbm-sidebar-nav">
-              {filteredSectionGroups.length ? (
-                filteredSectionGroups.map((group) => (
-                  <div key={group.label} className="tbm-nav-group">
-                    <h3 className="tbm-nav-group-title">{group.label}</h3>
-                    <ul className="tbm-nav-list">
-                      {group.items.map((sectionId) => {
-                        const item = sectionMeta.find((entry) => entry.id === sectionId);
-                        if (!item) {
-                          return null;
-                        }
-
-                        const active = activeSection === item.id;
-
-                        return (
-                          <li key={item.id}>
-                            <button
-                              type="button"
-                              className={`tbm-nav-item ${active ? "tbm-nav-item-active" : ""}`}
-                              onClick={() => setActiveSection(item.id)}
-                            >
-                              <span className="tbm-nav-icon">
-                                <i className={`bi ${item.icon}`}></i>
-                              </span>
-                              <span className="tbm-nav-label">{item.label}</span>
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </div>
-                ))
-              ) : (
-                <div className="tbm-sidebar-empty">
-                  Modul tidak ditemukan untuk kata kunci ini.
-                </div>
-              )}
-            </nav>
-
-            <div className="tbm-sidebar-footer">
-              <div className="tbm-sidebar-stats-title">System Snapshot</div>
-              <div className="tbm-sidebar-stats">
-                <span className="tbm-stat-badge">
-                  <i className="bi bi-check-circle"></i>
-                  Connected: {connectedAccounts.length}
-                </span>
-                <span className="tbm-stat-badge">
-                  <i className="bi bi-collection"></i>
-                  Active Groups: {activeGroupsCount}
-                </span>
-              </div>
-              <button
-                type="button"
-                className="tbm-logout-btn"
-                onClick={handleLogout}
-              >
-                <i className="bi bi-box-arrow-right"></i>
-                Logout
-              </button>
-            </div>
-          </div>
-        </aside>
-
-        <div className="tbm-main-area">
-          <header className="tbm-topbar">
-            <div className="tbm-topbar-inner">
-              <div className="tbm-topbar-left">
-                <button
-                  type="button"
-                  className="tbm-topbar-toggle"
-                  onClick={() => setSidebarOpen((prev) => !prev)}
-                  aria-label="Toggle sidebar"
-                >
-                  <i className="bi bi-list"></i>
-                </button>
-
-                <div className="tbm-topbar-search">
-                  <span className="tbm-topbar-search-icon">
-                    <i className="bi bi-search"></i>
-                  </span>
-                  <input
-                    type="text"
-                    placeholder="Search sections..."
-                    className="tbm-topbar-search-input"
-                    value={topbarSearch}
-                    onChange={(event) => setTopbarSearch(event.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div className="tbm-topbar-right">
-                <button
-                  type="button"
-                  className="tbm-topbar-btn"
-                  onClick={() => setDarkMode((prev) => !prev)}
-                  aria-label="Toggle dark mode"
-                >
-                  <i className={`bi ${darkMode ? "bi-sun" : "bi-moon"}`}></i>
-                </button>
-                <button
-                  type="button"
-                  className="tbm-topbar-btn"
-                  aria-label="Notifications"
-                >
-                  {notificationCount > 0 ? (
-                    <span className="tbm-topbar-notification-dot"></span>
-                  ) : null}
-                  <i className="bi bi-bell"></i>
-                </button>
-                <div className="tbm-auto-refresh-controls">
-                  <button
-                    type="button"
-                    className="tbm-topbar-btn"
-                    onClick={() => void loadAll()}
-                    disabled={syncing}
-                    aria-label="Refresh data"
-                  >
-                    <i className={`bi ${syncing ? "bi-arrow-repeat tbm-spin" : "bi-arrow-clockwise"}`}></i>
-                  </button>
-                  <button
-                    type="button"
-                    className={`tbm-topbar-btn tbm-auto-refresh-toggle ${autoRefresh ? "tbm-auto-refresh-active" : ""}`}
-                    onClick={() => setAutoRefresh((prev) => !prev)}
-                    aria-label="Toggle auto refresh"
-                    title={autoRefresh ? `Auto-refresh ON (${refreshCountdown}s)` : "Auto-refresh OFF"}
-                  >
-                    {autoRefresh ? (
-                      <span className="tbm-countdown-badge">{refreshCountdown}</span>
-                    ) : null}
-                    <i className={`bi ${autoRefresh ? "bi-broadcast-pin" : "bi-broadcast"}`}></i>
-                  </button>
-                  {autoRefresh ? (
-                    <select
-                      className="tbm-refresh-interval-select"
-                      value={autoRefreshInterval}
-                      onChange={(e) => setAutoRefreshInterval(Number(e.target.value))}
-                      title="Interval auto-refresh"
-                    >
-                      <option value={5}>5s</option>
-                      <option value={10}>10s</option>
-                      <option value={15}>15s</option>
-                      <option value={30}>30s</option>
-                      <option value={60}>60s</option>
-                    </select>
-                  ) : null}
-                </div>
-
-                <div className="tbm-topbar-user">
-                  <span className="tbm-topbar-user-avatar">AD</span>
-                  <span className="tbm-topbar-user-info">
-                    <strong>Admin</strong>
-                    <small>Broadcast Ops</small>
-                  </span>
-                </div>
-              </div>
-            </div>
-          </header>
-
-          <main>
-            <div className="tbm-page-container">
-              <div className="tbm-hero">
-                <p className="tbm-hero-breadcrumb">Dashboard / {selectedSectionMeta.label}</p>
-                <h1 className="tbm-hero-title">{selectedSectionMeta.label}</h1>
-                <p className="tbm-hero-subtitle">{selectedSectionMeta.subtitle}</p>
-
-                <div className="tbm-hero-pills">
-                  <span className="tbm-hero-pill">Runs: {runs.length}</span>
-                  <span className="tbm-hero-pill">Schedules: {schedules.length}</span>
-                  <span className="tbm-hero-pill">Templates: {templates.length}</span>
-                  <span className="tbm-hero-pill">Log entries: {sendLogs.length}</span>
-                  {lastRefreshedAt ? (
-                    <span className="tbm-hero-pill tbm-hero-pill-live">
-                      {autoRefresh ? (
-                        <span className="tbm-live-dot"></span>
-                      ) : null}
-                      Terakhir update: {lastRefreshedAt.toLocaleTimeString("id-ID")}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-
-              {error ? (
-                <div className="tbm-alert tbm-alert-error">{error}</div>
-              ) : null}
-
-              {notice ? (
-                <div className="tbm-alert tbm-alert-success">{notice}</div>
-              ) : null}
-
-              <div className="tbm-content-stack">{renderActiveSection()}</div>
-            </div>
-          </main>
-        </div>
-      </div>
-    </main>
+    <DashboardShell
+      sections={sectionMeta}
+      sectionGroups={filteredSectionGroups}
+      activeSection={activeSection}
+      selectedSection={selectedSectionMeta}
+      sidebarOpen={sidebarOpen}
+      setSidebarOpen={setSidebarOpen}
+      topbarSearch={topbarSearch}
+      setTopbarSearch={setTopbarSearch}
+      darkMode={darkMode}
+      setDarkMode={setDarkMode}
+      autoRefresh={autoRefresh}
+      setAutoRefresh={setAutoRefresh}
+      autoRefreshInterval={autoRefreshInterval}
+      setAutoRefreshInterval={setAutoRefreshInterval}
+      refreshCountdown={refreshCountdown}
+      syncing={syncing}
+      notificationCount={notificationCount}
+      connectedAccountsCount={connectedAccounts.length}
+      activeGroupsCount={activeGroupsCount}
+      runsCount={runs.length}
+      schedulesCount={schedules.length}
+      templatesCount={templates.length}
+      sendLogsCount={sendLogs.length}
+      lastRefreshedAt={lastRefreshedAt}
+      error={error}
+      notice={notice}
+      onSectionChange={setActiveSection}
+      onRefresh={loadAll}
+      onLogout={handleLogout}
+    >
+      {renderActiveSection()}
+    </DashboardShell>
   );
 }

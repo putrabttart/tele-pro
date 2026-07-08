@@ -263,6 +263,27 @@ class GroupService {
     });
   }
 
+  async updateStatusBatch(groupIds: string[], isActive: boolean) {
+    const uniqueGroupIds = Array.from(new Set(groupIds.filter(Boolean)));
+
+    if (!uniqueGroupIds.length) {
+      return { count: 0 };
+    }
+
+    const result = await prisma.group.updateMany({
+      where: { id: { in: uniqueGroupIds } },
+      data: { isActive }
+    });
+
+    await logActivity("groups", "Batch updated group status", "INFO", {
+      count: result.count,
+      requested: uniqueGroupIds.length,
+      isActive
+    });
+
+    return { count: result.count };
+  }
+
   async remove(id: string) {
     await prisma.group.delete({ where: { id } });
   }
@@ -326,22 +347,15 @@ class GroupService {
 
       const uniqueGroupIds = Array.from(new Set(groupIds));
 
-      await prisma.$transaction(async (tx) => {
-        await tx.accountGroup.deleteMany({ where: { accountId } });
-        if (uniqueGroupIds.length) {
-          await tx.accountGroup.createMany({
-            data: uniqueGroupIds.map((groupId) => ({ accountId, groupId })),
-            skipDuplicates: true
-          });
-        }
-      });
+      await this.linkAccountGroups(accountId, uniqueGroupIds);
 
       await logActivity("groups", "Synced groups from Telegram", "INFO", {
         accountId,
         total: uniqueGroupIds.length,
         created,
         updated,
-        skipped
+        skipped,
+        syncMode: "merge"
       });
 
       return {

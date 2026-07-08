@@ -597,7 +597,7 @@ const sendOneCycle = async (params: {
             })
           );
 
-          // Auto-deactivate group if it has a permanent issue
+          // Group-level errors can be account-specific, so keep the group active for other accounts.
           if (
             sendResult.errorCode === "CHAT_WRITE_FORBIDDEN" ||
             sendResult.errorCode === "CHANNEL_PRIVATE" ||
@@ -605,14 +605,7 @@ const sendOneCycle = async (params: {
             sendResult.errorCode === "USER_DEACTIVATED" ||
             sendResult.errorCode === "CHAT_RESTRICTED"
           ) {
-            await safeDbWrite(() =>
-              prisma.group.update({
-                where: { id: group.id },
-                data: { isActive: false }
-              })
-            );
-
-            await logActivity("worker", `Grup auto-deactivated: ${sendResult.errorCode}`, "WARN", {
+            await logActivity("worker", `Grup dilewati: ${sendResult.errorCode}`, "WARN", {
               runId,
               groupId: group.id,
               groupIdentifier,

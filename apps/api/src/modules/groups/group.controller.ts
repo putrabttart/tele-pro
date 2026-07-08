@@ -30,6 +30,11 @@ class GroupController {
     res.json(updated);
   }
 
+  async updateStatusBatch(req: Request, res: Response) {
+    const result = await groupService.updateStatusBatch(req.body.groupIds, req.body.isActive);
+    res.json(result);
+  }
+
   async remove(req: Request, res: Response) {
     await groupService.remove(req.params.id);
     res.status(204).send();

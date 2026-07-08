@@ -6,6 +6,7 @@ import { groupController } from "./group.controller";
 import {
   addGroupByLinkSchema,
   addGroupBatchSchema,
+  batchUpdateGroupStatusSchema,
   createGroupSchema,
   importGroupFolderLinkSchema,
   importGroupTextSchema,
@@ -25,6 +26,10 @@ groupRoutes.get("/", asyncHandler(async (req, res) => {
 
 groupRoutes.post("/", validateBody(createGroupSchema), asyncHandler(async (req, res) => {
   await groupController.create(req, res);
+}));
+
+groupRoutes.patch("/batch-status", validateBody(batchUpdateGroupStatusSchema), asyncHandler(async (req, res) => {
+  await groupController.updateStatusBatch(req, res);
 }));
 
 groupRoutes.patch("/:id", validateBody(updateGroupSchema), asyncHandler(async (req, res) => {
