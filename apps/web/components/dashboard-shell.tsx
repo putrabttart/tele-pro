@@ -50,6 +50,7 @@ type DashboardShellProps = {
   lastRefreshedAt: Date | null;
   error: string;
   notice: string;
+  showSnapshot?: boolean;
   onSectionChange: (section: DashboardSectionId) => void;
   onRefresh: () => void | Promise<void>;
   onLogout: () => void;
@@ -87,10 +88,18 @@ export function DashboardShell({
   lastRefreshedAt,
   error,
   notice,
+  showSnapshot = false,
   onSectionChange,
   onRefresh,
   onLogout
 }: DashboardShellProps) {
+  const systemCards = [
+    { label: "Accounts", value: connectedAccountsCount, icon: "bi-phone", tone: "primary" },
+    { label: "Groups", value: activeGroupsCount, icon: "bi-collection", tone: "success" },
+    { label: "Runs", value: runsCount, icon: "bi-activity", tone: "warning" },
+    { label: "Logs", value: sendLogsCount, icon: "bi-journal-text", tone: "info" }
+  ];
+
   return (
     <main className="tbm-admin-page">
       <div className="tbm-layout">
@@ -104,11 +113,11 @@ export function DashboardShell({
           <div className="tbm-sidebar-header">
             <a href="#" onClick={(event) => event.preventDefault()} className="tbm-brand-link">
               <div className="tbm-brand-icon">
-                <i className="bi bi-broadcast"></i>
+                <i className="bi bi-send-check-fill"></i>
               </div>
               <div className="tbm-brand-text">
                 <strong>BLAST TELE</strong>
-                <small>Broadcast Manager</small>
+                <small>Admin Console</small>
               </div>
             </a>
             <button
@@ -119,6 +128,14 @@ export function DashboardShell({
             >
               <i className="bi bi-x-lg"></i>
             </button>
+          </div>
+
+          <div className="tbm-sidebar-profile">
+            <div className="tbm-sidebar-profile-avatar">BA</div>
+            <div className="tbm-sidebar-profile-copy">
+              <span>Broadcast Admin</span>
+              <small>{connectedAccountsCount} akun connected</small>
+            </div>
           </div>
 
           <div className="tbm-sidebar-content">
@@ -147,6 +164,7 @@ export function DashboardShell({
                                 <i className={`bi ${item.icon}`}></i>
                               </span>
                               <span className="tbm-nav-label">{item.label}</span>
+                              {active ? <span className="tbm-nav-active-mark"></span> : null}
                             </button>
                           </li>
                         );
@@ -160,7 +178,7 @@ export function DashboardShell({
             </nav>
 
             <div className="tbm-sidebar-footer">
-              <div className="tbm-sidebar-stats-title">System Snapshot</div>
+              <div className="tbm-sidebar-stats-title">Quick Status</div>
               <div className="tbm-sidebar-stats">
                 <span className="tbm-stat-badge">
                   <i className="bi bi-check-circle"></i>
@@ -204,7 +222,7 @@ export function DashboardShell({
                   </span>
                   <input
                     type="text"
-                    placeholder="Search sections..."
+                    placeholder="Search modules, menus..."
                     className="tbm-topbar-search-input"
                     value={topbarSearch}
                     onChange={(event) => setTopbarSearch(event.target.value)}
@@ -213,6 +231,10 @@ export function DashboardShell({
               </div>
 
               <div className="tbm-topbar-right">
+                <div className="tbm-topbar-status">
+                  <span className="tbm-live-dot"></span>
+                  {autoRefresh ? `Auto ${refreshCountdown}s` : "Manual refresh"}
+                </div>
                 <button
                   type="button"
                   className="tbm-topbar-btn"
@@ -274,24 +296,63 @@ export function DashboardShell({
 
           <main className="tbm-dashboard-main">
             <div className="tbm-page-container">
-              <div className="tbm-hero">
-                <p className="tbm-hero-breadcrumb">Dashboard / {selectedSection.label}</p>
-                <h1 className="tbm-hero-title">{selectedSection.label}</h1>
-                <p className="tbm-hero-subtitle">{selectedSection.subtitle}</p>
+              <div className="tbm-page-head">
+                <div className="tbm-page-title-wrap">
+                  <div className="tbm-page-kicker">
+                    <span className="tbm-page-kicker-dot"></span>
+                    Dashboard / {selectedSection.label}
+                  </div>
+                  <h1 className="tbm-page-title">{selectedSection.label}</h1>
+                  <p className="tbm-page-subtitle">{selectedSection.subtitle}</p>
+                </div>
 
-                <div className="tbm-hero-pills">
-                  <span className="tbm-hero-pill">Runs: {runsCount}</span>
-                  <span className="tbm-hero-pill">Schedules: {schedulesCount}</span>
-                  <span className="tbm-hero-pill">Templates: {templatesCount}</span>
-                  <span className="tbm-hero-pill">Log entries: {sendLogsCount}</span>
+                <div className="tbm-page-head-actions">
                   {lastRefreshedAt ? (
-                    <span className="tbm-hero-pill tbm-hero-pill-live">
-                      {autoRefresh ? <span className="tbm-live-dot"></span> : null}
-                      Terakhir update: {lastRefreshedAt.toLocaleTimeString("id-ID")}
+                    <span className="tbm-page-updated">
+                      <i className="bi bi-clock-history"></i>
+                      {lastRefreshedAt.toLocaleTimeString("id-ID")}
                     </span>
                   ) : null}
+                  <button type="button" className="btn btn-primary" onClick={() => void onRefresh()} disabled={syncing}>
+                    <i className={`bi ${syncing ? "bi-arrow-repeat tbm-spin" : "bi-arrow-clockwise"} me-2`}></i>
+                    Refresh
+                  </button>
                 </div>
               </div>
+
+              {showSnapshot ? (
+                <div className="tbm-admin-snapshot">
+                  {systemCards.map((card) => (
+                    <div className={`tbm-admin-snapshot-card tbm-admin-snapshot-${card.tone}`} key={card.label}>
+                      <span className="tbm-admin-snapshot-icon">
+                        <i className={`bi ${card.icon}`}></i>
+                      </span>
+                      <span className="tbm-admin-snapshot-copy">
+                        <strong>{card.value}</strong>
+                        <small>{card.label}</small>
+                      </span>
+                    </div>
+                  ))}
+                  <div className="tbm-admin-snapshot-card tbm-admin-snapshot-muted">
+                    <span className="tbm-admin-snapshot-icon">
+                      <i className="bi bi-calendar2-check"></i>
+                    </span>
+                    <span className="tbm-admin-snapshot-copy">
+                      <strong>{schedulesCount}</strong>
+                      <small>Schedules</small>
+                    </span>
+                  </div>
+                  <div className="tbm-admin-snapshot-card tbm-admin-snapshot-muted">
+                    <span className="tbm-admin-snapshot-icon">
+                      <i className="bi bi-file-earmark-text"></i>
+                    </span>
+                    <span className="tbm-admin-snapshot-copy">
+                      <strong>{templatesCount}</strong>
+                      <small>Templates</small>
+                    </span>
+                  </div>
+                </div>
+              ) : null}
 
               {error ? <div className="tbm-alert tbm-alert-error">{error}</div> : null}
               {notice ? <div className="tbm-alert tbm-alert-success">{notice}</div> : null}

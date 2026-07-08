@@ -3328,13 +3328,13 @@ export default function DashboardPage() {
         )}
 
         {/* ── Run History ── */}
-        <div className="tbm-panel">
-          <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div className="tbm-panel tbm-section-panel">
+          <div className="tbm-panel-toolbar">
             <div>
               <h5 className="tbm-panel-title mb-0">Run History</h5>
               <p className="tbm-panel-desc mb-0">Riwayat semua broadcast yang pernah dijalankan.</p>
             </div>
-            <div className="d-flex align-items-center gap-2">
+            <div className="tbm-toolbar-actions">
               <select
                 className="tbm-perpage-select"
                 value={runStatusFilter}
@@ -3491,13 +3491,13 @@ export default function DashboardPage() {
           ) : null}
         </div>
 
-        <div className="tbm-panel">
-          <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div className="tbm-panel tbm-section-panel">
+          <div className="tbm-panel-toolbar">
             <div>
               <h5 className="tbm-panel-title mb-0">Send Logs per Sesi Broadcast</h5>
               <p className="tbm-panel-desc mb-0">Pilih sesi broadcast untuk melihat detail log pengiriman dan error per group.</p>
             </div>
-            <div className="d-flex align-items-center gap-2 flex-wrap">
+            <div className="tbm-toolbar-actions">
               <button
                 className="btn btn-sm btn-outline-dark"
                 type="button"
@@ -3511,7 +3511,7 @@ export default function DashboardPage() {
 
           {/* ── Session selector ── */}
           <div className="tbm-log-session-filter mt-3">
-            <div className="d-flex align-items-center gap-2 flex-wrap">
+            <div className="tbm-filter-toolbar">
               <label className="form-label mb-0 fw-semibold small">Sesi Broadcast:</label>
               <select
                 className="form-select form-select-sm"
@@ -3808,6 +3808,7 @@ export default function DashboardPage() {
       lastRefreshedAt={lastRefreshedAt}
       error={error}
       notice={notice}
+      showSnapshot={activeSection === "overview"}
       onSectionChange={setActiveSection}
       onRefresh={loadAll}
       onLogout={handleLogout}
