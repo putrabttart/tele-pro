@@ -17,7 +17,9 @@ const envSchema = z.object({
   TELEGRAM_API_HASH: z.string().optional(),
   MIN_SPACING_MS: z.coerce.number().default(5000),
   RUN_POLL_INTERVAL_MS: z.coerce.number().default(3000),
-  SCHEDULE_POLL_INTERVAL_MS: z.coerce.number().default(30000)
+  SCHEDULE_POLL_INTERVAL_MS: z.coerce.number().default(30000),
+  LOG_RETENTION_DAYS: z.coerce.number().default(30),
+  LOG_RETENTION_INTERVAL_MS: z.coerce.number().default(6 * 60 * 60 * 1000)
 });
 
 export const env = envSchema.parse(process.env);

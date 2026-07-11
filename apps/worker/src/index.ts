@@ -1,8 +1,10 @@
 import { startBroadcastWorker, gracefulShutdown } from "./jobs/broadcast.worker";
+import { startLogRetentionWorker } from "./jobs/log-retention.worker";
 import { startSchedulerWorker } from "./jobs/scheduler.worker";
 
 const schedulerTimer = startSchedulerWorker();
 const broadcastTimer = startBroadcastWorker();
+const logRetentionTimer = startLogRetentionWorker();
 
 let shuttingDown = false;
 
@@ -15,6 +17,7 @@ const handleShutdown = async (signal: string) => {
 
   clearInterval(schedulerTimer);
   clearInterval(broadcastTimer);
+  clearInterval(logRetentionTimer);
 
   await gracefulShutdown();
 

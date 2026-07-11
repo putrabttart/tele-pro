@@ -133,16 +133,41 @@ class BroadcastService {
     return run;
   }
 
-  async listRuns() {
+  async listRuns(limit = 80) {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit) || 80, 1), 120);
+
     return prisma.broadcastRun.findMany({
-      include: {
-        schedule: true,
-        setting: true
+      select: {
+        id: true,
+        label: true,
+        scheduleId: true,
+        settingId: true,
+        requestedAccountId: true,
+        requestedTemplateIds: true,
+        status: true,
+        reason: true,
+        pausedUntil: true,
+        startedAt: true,
+        finishedAt: true,
+        totalGroups: true,
+        sentCount: true,
+        failedCount: true,
+        pendingCount: true,
+        totalDurationHours: true,
+        intervalMinutes: true,
+        completedCycles: true,
+        currentCycleStartedAt: true,
+        currentCycleNumber: true,
+        lastCycleFinishedAt: true,
+        nextCycleAt: true,
+        consecutiveFailCount: true,
+        createdAt: true,
+        updatedAt: true
       },
       orderBy: {
         createdAt: "desc"
       },
-      take: 100
+      take: safeLimit
     });
   }
 

@@ -7,8 +7,9 @@ class BroadcastController {
     res.status(202).json(data);
   }
 
-  async listRuns(_req: Request, res: Response) {
-    const data = await broadcastService.listRuns();
+  async listRuns(req: Request, res: Response) {
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    const data = await broadcastService.listRuns(limit);
     res.json(data);
   }
 

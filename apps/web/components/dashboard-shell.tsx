@@ -274,11 +274,9 @@ export function DashboardShell({
                       onChange={(event) => setAutoRefreshInterval(Number(event.target.value))}
                       title="Interval auto-refresh"
                     >
-                      <option value={5}>5s</option>
-                      <option value={10}>10s</option>
-                      <option value={15}>15s</option>
                       <option value={30}>30s</option>
                       <option value={60}>60s</option>
+                      <option value={120}>120s</option>
                     </select>
                   ) : null}
                 </div>

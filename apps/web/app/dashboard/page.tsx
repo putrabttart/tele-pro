@@ -804,8 +804,8 @@ export default function DashboardPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [autoRefreshInterval, setAutoRefreshInterval] = useState(10);
-  const [refreshCountdown, setRefreshCountdown] = useState(10);
+  const [autoRefreshInterval, setAutoRefreshInterval] = useState(30);
+  const [refreshCountdown, setRefreshCountdown] = useState(30);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1290,8 +1290,8 @@ export default function DashboardPage() {
         apiFetch<ScheduleItem[]>("/api/scheduler"),
         apiFetch<TelegramAccount[]>("/api/telegram/accounts"),
         apiFetch<TemplateItem[]>("/api/templates"),
-        apiFetch<RunItem[]>("/api/broadcast/runs"),
-        apiFetch<SendLogItem[]>("/api/logs/send"),
+        apiFetch<RunItem[]>("/api/broadcast/runs?limit=80"),
+        apiFetch<SendLogItem[]>("/api/logs/send?limit=120"),
         apiFetch<BusyAccountInfo[]>("/api/broadcast/busy-accounts")
       ]);
 
@@ -1302,7 +1302,7 @@ export default function DashboardPage() {
       setAccounts(accountsRes);
       setTemplates(templatesRes);
       setRuns(runsRes);
-      setSendLogs(sendLogsRes.slice(0, 120));
+      setSendLogs(sendLogsRes);
       setBusyAccounts(busyAccountsRes);
       setLastRefreshedAt(new Date());
     } catch (err) {
@@ -1877,7 +1877,13 @@ export default function DashboardPage() {
   const handleExportLogs = async () => {
     await withBusyAction("logs-export", async () => {
       const token = getToken();
-      const response = await fetch(`${apiBaseUrl}/api/logs/send/export`, {
+      const params = new URLSearchParams({ limit: "5000" });
+      if (logRunFilter !== "ALL") params.set("runId", logRunFilter);
+      if (logFilter !== "ALL") params.set("status", logFilter);
+      if (logDateFrom) params.set("from", logDateFrom);
+      if (logDateTo) params.set("to", logDateTo);
+
+      const response = await fetch(`${apiBaseUrl}/api/logs/send/export?${params.toString()}`, {
         headers: {
           Authorization: `Bearer ${token}`
         }
