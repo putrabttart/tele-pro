@@ -1,14 +1,24 @@
 const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL ?? "";
 
-const resolveApiUrl = () => {
+const joinApiUrl = (baseUrl: string, path: string) => {
+  if (!baseUrl || baseUrl === "/") return path;
+  return `${baseUrl.replace(/\/$/, "")}${path}`;
+};
+
+export const getApiBaseUrl = () => {
   if (typeof window === "undefined") {
-    return configuredApiUrl || "http://localhost:4000";
+    return configuredApiUrl;
   }
 
   const isBrowserLocalhost = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
   const configuredIsLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(configuredApiUrl);
+  const configuredIsInsecureHttp = /^http:\/\//i.test(configuredApiUrl);
 
-  if (!configuredApiUrl || (configuredIsLocalhost && !isBrowserLocalhost)) {
+  if (
+    !configuredApiUrl
+    || (configuredIsLocalhost && !isBrowserLocalhost)
+    || (window.location.protocol === "https:" && configuredIsInsecureHttp)
+  ) {
     return window.location.origin;
   }
 
@@ -93,9 +103,9 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const apiUrl = resolveApiUrl();
+  const apiUrl = getApiBaseUrl();
 
-  let response = await fetch(`${apiUrl}${path}`, {
+  let response = await fetch(joinApiUrl(apiUrl, path), {
     ...init,
     headers
   });
@@ -105,7 +115,7 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
     const refreshToken = getRefreshToken();
     if (refreshToken) {
       try {
-        const refreshRes = await fetch(`${apiUrl}/api/auth/refresh`, {
+        const refreshRes = await fetch(joinApiUrl(apiUrl, "/api/auth/refresh"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ refresh_token: refreshToken })
@@ -121,7 +131,7 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
 
           // Retry original request with new token
           headers.set("Authorization", `Bearer ${refreshData.access_token}`);
-          response = await fetch(`${apiUrl}${path}`, { ...init, headers });
+          response = await fetch(joinApiUrl(apiUrl, path), { ...init, headers });
         } else {
           clearToken();
           throw new Error("Session expired. Silakan login ulang.");
@@ -151,5 +161,3 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
 
   return JSON.parse(raw) as T;
 };
-
-export const apiBaseUrl = resolveApiUrl();

@@ -10,7 +10,7 @@ import {
   type DashboardSectionId,
   type DashboardSectionMeta
 } from "../../components/dashboard-shell";
-import { apiBaseUrl, apiFetch, clearToken, getToken } from "../../lib/api";
+import { apiFetch, clearToken, getApiBaseUrl, getToken } from "../../lib/api";
 import type {
   BusyAccountInfo,
   DashboardOverview,
@@ -1883,7 +1883,12 @@ export default function DashboardPage() {
       if (logDateFrom) params.set("from", logDateFrom);
       if (logDateTo) params.set("to", logDateTo);
 
-      const response = await fetch(`${apiBaseUrl}/api/logs/send/export?${params.toString()}`, {
+      const apiBaseUrl = getApiBaseUrl();
+      const exportUrl = apiBaseUrl && apiBaseUrl !== "/"
+        ? `${apiBaseUrl.replace(/\/$/, "")}/api/logs/send/export?${params.toString()}`
+        : `/api/logs/send/export?${params.toString()}`;
+
+      const response = await fetch(exportUrl, {
         headers: {
           Authorization: `Bearer ${token}`
         }
