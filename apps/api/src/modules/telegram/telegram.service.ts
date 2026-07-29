@@ -3,7 +3,20 @@ import { prisma } from "../../config/prisma";
 import { decryptText, encryptText } from "../../utils/crypto";
 import { logActivity } from "../../utils/logger";
 import { ApiError } from "../../utils/api-error";
-import { mtprotoClient } from "../../telegram/mtproto-client";
+import { TelegramApiError, mtprotoClient, toTelegramApiError } from "../../telegram/mtproto-client";
+
+const throwTelegramApiError = (error: unknown): never => {
+  if (error instanceof ApiError) {
+    throw error;
+  }
+
+  const normalizedError = toTelegramApiError(error);
+  if (normalizedError instanceof TelegramApiError) {
+    throw new ApiError(409, normalizedError.message, normalizedError.originalMessage);
+  }
+
+  throw normalizedError;
+};
 
 class TelegramService {
   async listAccounts() {
@@ -13,16 +26,14 @@ class TelegramService {
   }
 
   async requestOtp(phone: string, label: string) {
-    let result;
-    try {
-      result = await mtprotoClient.requestOtp(phone, label);
-    } catch (error) {
+    const result = await mtprotoClient.requestOtp(phone, label).catch((error): never => {
       const msg = error instanceof Error ? error.message : "";
       if (/AUTH_KEY_DUPLICATED/i.test(msg)) {
         throw new ApiError(409, "Akun ini sedang digunakan oleh broadcast yang aktif. Hentikan broadcast dulu atau tunggu sampai selesai, lalu coba lagi.");
       }
-      throw error;
-    }
+
+      return throwTelegramApiError(error);
+    });
 
     await prisma.telegramAccount.upsert({
       where: { phone },
@@ -42,16 +53,14 @@ class TelegramService {
   }
 
   async verifyOtp(phone: string, code: string) {
-    let result;
-    try {
-      result = await mtprotoClient.verifyOtp(phone, code);
-    } catch (error) {
+    const result = await mtprotoClient.verifyOtp(phone, code).catch((error): never => {
       const msg = error instanceof Error ? error.message : "";
       if (/AUTH_KEY_DUPLICATED/i.test(msg)) {
         throw new ApiError(409, "Akun ini sedang digunakan oleh broadcast yang aktif. Hentikan broadcast dulu atau tunggu sampai selesai, lalu coba lagi.");
       }
-      throw error;
-    }
+
+      return throwTelegramApiError(error);
+    });
 
     const encryptedSession = encryptText(result.session);
 
@@ -96,7 +105,10 @@ class TelegramService {
     }
 
     const decrypted = decryptText(account.encryptedSession);
-    const client = await mtprotoClient.connectFromSession(decrypted);
+    const client = await mtprotoClient.connectFromSession(decrypted).catch((error): never => {
+      return throwTelegramApiError(error);
+    });
+
     await client.disconnect();
 
     return { connected: true, message: "Session valid" };

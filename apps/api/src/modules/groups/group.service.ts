@@ -1,7 +1,7 @@
-import { TelegramConnectionStatus } from "@prisma/client";
-import { Api } from "telegram";
+import { RunStatus, TelegramAccount, TelegramConnectionStatus } from "@prisma/client";
+import { Api, TelegramClient } from "telegram";
 import { prisma } from "../../config/prisma";
-import { mtprotoClient } from "../../telegram/mtproto-client";
+import { TelegramApiError, mtprotoClient, toTelegramApiError } from "../../telegram/mtproto-client";
 import { ApiError } from "../../utils/api-error";
 import { decryptText } from "../../utils/crypto";
 import { logActivity } from "../../utils/logger";
@@ -46,6 +46,57 @@ type BatchAddResult = {
     notFound: number;
     joinFailed: number;
   };
+};
+
+type GroupSyncResult = {
+  accountId: string;
+  total: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  removed: number;
+};
+
+type GroupSyncJob = {
+  accountId: string;
+  status: "running" | "completed" | "failed";
+  startedAt: Date;
+  finishedAt?: Date;
+  result?: GroupSyncResult;
+  error?: string;
+};
+
+const SYNC_DIALOG_LIMIT = 500;
+const SYNC_DIALOG_TIMEOUT_MS = 90_000;
+const groupSyncJobs = new Map<string, GroupSyncJob>();
+
+const throwTelegramApiError = (error: unknown): never => {
+  if (error instanceof ApiError) {
+    throw error;
+  }
+
+  const normalizedError = toTelegramApiError(error);
+  if (normalizedError instanceof TelegramApiError) {
+    throw new ApiError(409, normalizedError.message, normalizedError.originalMessage);
+  }
+
+  throw normalizedError;
+};
+
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new ApiError(504, message)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 };
 
 const normalizeUsername = (username?: string) => {
@@ -217,6 +268,206 @@ class GroupService {
     });
   }
 
+  private async replaceAccountGroups(accountId: string, groupIds: string[]) {
+    const uniqueGroupIds = Array.from(new Set(groupIds.filter(Boolean)));
+
+    const staleLinks = await prisma.accountGroup.findMany({
+      where: {
+        accountId,
+        ...(uniqueGroupIds.length ? { groupId: { notIn: uniqueGroupIds } } : {})
+      },
+      select: { id: true }
+    });
+
+    if (staleLinks.length) {
+      await prisma.accountGroup.deleteMany({
+        where: { id: { in: staleLinks.map((link) => link.id) } }
+      });
+    }
+
+    await this.linkAccountGroups(accountId, uniqueGroupIds);
+
+    return staleLinks.length;
+  }
+
+  private async getBusyRunForAccount(accountId: string) {
+    return prisma.broadcastRun.findFirst({
+      where: {
+        requestedAccountId: accountId,
+        status: { in: [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED] }
+      },
+      select: {
+        id: true,
+        label: true,
+        status: true
+      }
+    });
+  }
+
+  private async getBusyRunsForAccounts(accountIds: string[]) {
+    if (!accountIds.length) {
+      return [];
+    }
+
+    return prisma.broadcastRun.findMany({
+      where: {
+        requestedAccountId: { in: accountIds },
+        status: { in: [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED] }
+      },
+      select: {
+        id: true,
+        label: true,
+        status: true,
+        requestedAccountId: true
+      }
+    });
+  }
+
+  private async filterAvailableAccounts(accounts: TelegramAccount[]) {
+    const busyRuns = await this.getBusyRunsForAccounts(accounts.map((account) => account.id));
+    const busyAccountIds = new Set(busyRuns.map((run) => run.requestedAccountId).filter(Boolean));
+
+    return accounts.filter((account) => !busyAccountIds.has(account.id));
+  }
+
+  private async findConnectedAccount(accountId?: string) {
+    if (accountId) {
+      return prisma.telegramAccount.findUnique({ where: { id: accountId } });
+    }
+
+    const accounts = await prisma.telegramAccount.findMany({
+      where: {
+        status: TelegramConnectionStatus.CONNECTED,
+        encryptedSession: { not: null }
+      },
+      orderBy: { updatedAt: "desc" }
+    });
+
+    const availableAccounts = await this.filterAvailableAccounts(accounts);
+    if (accounts.length && !availableAccounts.length) {
+      throw new ApiError(409, "Semua akun Telegram sedang dipakai broadcast aktif. Hentikan/tunggu broadcast selesai sebelum tambah atau sync group.");
+    }
+
+    return availableAccounts[0] ?? null;
+  }
+
+  private async connectAccount(account: { id: string; encryptedSession: string | null }): Promise<TelegramClient> {
+    const busyRun = await this.getBusyRunForAccount(account.id);
+    if (busyRun) {
+      const runLabel = busyRun.label || busyRun.id.slice(0, 8);
+      throw new ApiError(409, `Akun ini sedang dipakai broadcast "${runLabel}" (${busyRun.status}). Hentikan/tunggu broadcast selesai sebelum sync atau tambah group.`);
+    }
+
+    if (!account.encryptedSession) {
+      throw new ApiError(400, "Akun Telegram yang dipilih belum terhubung.");
+    }
+
+    const session = decryptText(account.encryptedSession);
+    try {
+      return await mtprotoClient.connectFromSession(session);
+    } catch (error) {
+      throwTelegramApiError(error);
+    }
+
+    throw new ApiError(500, "Gagal membuat koneksi Telegram.");
+  }
+
+  private async upsertGroupsBatch(groups: UpsertGroupInput[]) {
+    const uniqueGroups = new Map<string, UpsertGroupInput>();
+
+    for (const group of groups) {
+      const username = normalizeUsername(group.username);
+      const telegramId = group.telegramId?.trim();
+      if (!username && !telegramId) {
+        continue;
+      }
+
+      uniqueGroups.set(username ? `u:${username.toLowerCase()}` : `t:${telegramId}`, {
+        ...group,
+        username,
+        telegramId
+      });
+    }
+
+    const payloads = Array.from(uniqueGroups.values());
+    if (!payloads.length) {
+      return { created: 0, updated: 0, skipped: groups.length, groupIds: [] as string[] };
+    }
+
+    const existingGroups = await prisma.group.findMany({
+      where: {
+        OR: [
+          { username: { in: payloads.map((item) => item.username).filter((item): item is string => Boolean(item)) } },
+          { telegramId: { in: payloads.map((item) => item.telegramId).filter((item): item is string => Boolean(item)) } }
+        ]
+      }
+    });
+
+    const existingByKey = new Map<string, typeof existingGroups[number]>();
+    for (const group of existingGroups) {
+      if (group.username) {
+        existingByKey.set(`u:${group.username.toLowerCase()}`, group);
+      }
+      if (group.telegramId) {
+        existingByKey.set(`t:${group.telegramId}`, group);
+      }
+    }
+
+    let created = 0;
+    let updated = 0;
+    let skipped = groups.length - payloads.length;
+    const groupIds: string[] = [];
+
+    for (const payload of payloads) {
+      const tags = Array.from(new Set(payload.tags ?? []));
+      const key = payload.username ? `u:${payload.username.toLowerCase()}` : `t:${payload.telegramId}`;
+      const existing = existingByKey.get(key);
+
+      if (existing) {
+        const nextTitle = payload.title ?? existing.title;
+        const nextTags = Array.from(new Set([...(existing.tags ?? []), ...tags]));
+        const nextIsActive = payload.isActive ?? existing.isActive;
+        const tagsChanged = nextTags.length !== existing.tags.length || nextTags.some((tag) => !existing.tags.includes(tag));
+
+        if (nextTitle !== existing.title || nextIsActive !== existing.isActive || tagsChanged) {
+          await prisma.group.update({
+            where: { id: existing.id },
+            data: {
+              title: nextTitle,
+              tags: nextTags,
+              isActive: nextIsActive
+            }
+          });
+          updated += 1;
+        } else {
+          skipped += 1;
+        }
+
+        groupIds.push(existing.id);
+        continue;
+      }
+
+      const createdGroup = await prisma.group.create({
+        data: {
+          telegramId: payload.telegramId,
+          username: payload.username,
+          title: payload.title,
+          tags,
+          isActive: payload.isActive ?? true
+        }
+      });
+      created += 1;
+      groupIds.push(createdGroup.id);
+    }
+
+    return {
+      created,
+      updated,
+      skipped,
+      groupIds
+    };
+  }
+
   async list(search?: string, tag?: string, accountId?: string) {
     return prisma.group.findMany({
       where: {
@@ -288,18 +539,80 @@ class GroupService {
     await prisma.group.delete({ where: { id } });
   }
 
-  async syncFromTelegram(accountId: string) {
+  getSyncStatus(accountId: string) {
+    return groupSyncJobs.get(accountId) ?? {
+      accountId,
+      status: "idle" as const
+    };
+  }
+
+  async startSyncFromTelegram(accountId: string) {
+    const runningJob = groupSyncJobs.get(accountId);
+    if (runningJob?.status === "running") {
+      return runningJob;
+    }
+
+    const account = await prisma.telegramAccount.findUnique({ where: { id: accountId } });
+    if (!account?.encryptedSession) {
+      throw new ApiError(400, "Tidak ada akun Telegram yang terhubung untuk sinkronisasi group.");
+    }
+
+    const busyRun = await this.getBusyRunForAccount(accountId);
+    if (busyRun) {
+      const runLabel = busyRun.label || busyRun.id.slice(0, 8);
+      throw new ApiError(409, `Akun ini sedang dipakai broadcast "${runLabel}" (${busyRun.status}). Hentikan/tunggu broadcast selesai sebelum sync group.`);
+    }
+
+    const job: GroupSyncJob = {
+      accountId,
+      status: "running",
+      startedAt: new Date()
+    };
+    groupSyncJobs.set(accountId, job);
+
+    void this.syncFromTelegram(accountId)
+      .then((result) => {
+        groupSyncJobs.set(accountId, {
+          ...job,
+          status: "completed",
+          finishedAt: new Date(),
+          result
+        });
+      })
+      .catch((error) => {
+        const normalizedError = toTelegramApiError(error);
+        const message = normalizedError instanceof Error ? normalizedError.message : String(normalizedError);
+        groupSyncJobs.set(accountId, {
+          ...job,
+          status: "failed",
+          finishedAt: new Date(),
+          error: message
+        });
+
+        void logActivity("groups", "Sync groups from Telegram failed", "ERROR", {
+          accountId,
+          error: message
+        });
+      });
+
+    return job;
+  }
+
+  async syncFromTelegram(accountId: string): Promise<GroupSyncResult> {
     const account = await prisma.telegramAccount.findUnique({ where: { id: accountId } });
 
     if (!account?.encryptedSession) {
       throw new ApiError(400, "Tidak ada akun Telegram yang terhubung untuk sinkronisasi group.");
     }
 
-    const session = decryptText(account.encryptedSession);
-    const client = await mtprotoClient.connectFromSession(session);
+    const client = await this.connectAccount(account);
 
     try {
-      const dialogs = await (client as any).getDialogs({ limit: 500 });
+      const dialogs = await withTimeout(
+        (client as any).getDialogs({ limit: SYNC_DIALOG_LIMIT }),
+        SYNC_DIALOG_TIMEOUT_MS,
+        "Sync group timeout saat mengambil dialog dari Telegram. Coba lagi saat koneksi stabil atau pastikan akun tidak sedang dipakai proses lain."
+      );
       const rawList = Array.isArray(dialogs)
         ? dialogs
         : Array.isArray((dialogs as any)?.dialogs)
@@ -308,10 +621,8 @@ class GroupService {
             ? (dialogs as any).chats
             : [];
 
-      let created = 0;
-      let updated = 0;
       let skipped = 0;
-      const groupIds: string[] = [];
+      const payloads: UpsertGroupInput[] = [];
 
       for (const item of rawList) {
         const entity = (item as any)?.entity ?? item;
@@ -331,40 +642,35 @@ class GroupService {
           continue;
         }
 
-        const status = await this.upsertGroup(payload);
-        if (status.status === "created") {
-          created += 1;
-        } else if (status.status === "updated") {
-          updated += 1;
-        } else {
-          skipped += 1;
-        }
-
-        if (status.groupId) {
-          groupIds.push(status.groupId);
-        }
+        payloads.push(payload);
       }
 
-      const uniqueGroupIds = Array.from(new Set(groupIds));
+      const upsertResult = await this.upsertGroupsBatch(payloads);
+      skipped += upsertResult.skipped;
+      const uniqueGroupIds = Array.from(new Set(upsertResult.groupIds));
 
-      await this.linkAccountGroups(accountId, uniqueGroupIds);
+      const removed = await this.replaceAccountGroups(accountId, uniqueGroupIds);
 
       await logActivity("groups", "Synced groups from Telegram", "INFO", {
         accountId,
         total: uniqueGroupIds.length,
-        created,
-        updated,
+        created: upsertResult.created,
+        updated: upsertResult.updated,
+        removed,
         skipped,
-        syncMode: "merge"
+        syncMode: "replace"
       });
 
       return {
         accountId,
         total: uniqueGroupIds.length,
-        created,
-        updated,
-        skipped
+        created: upsertResult.created,
+        updated: upsertResult.updated,
+        skipped,
+        removed
       };
+    } catch (error) {
+      return throwTelegramApiError(error);
     } finally {
       await client.disconnect();
     }
@@ -382,7 +688,7 @@ class GroupService {
       throw new ApiError(400, "Tidak ada username valid untuk diproses.");
     }
 
-    const accounts = target === "all"
+    const selectedAccounts = target === "all"
       ? await prisma.telegramAccount.findMany({
           where: {
             status: TelegramConnectionStatus.CONNECTED,
@@ -394,15 +700,23 @@ class GroupService {
         ? await prisma.telegramAccount.findMany({ where: { id: accountId } })
         : [];
 
-    if (!accounts.length) {
+    if (!selectedAccounts.length) {
       throw new ApiError(400, "Tidak ada akun Telegram yang tersedia untuk batch add.");
     }
 
     if (target === "single") {
-      const chosen = accounts[0];
+      const chosen = selectedAccounts[0];
       if (!chosen?.encryptedSession) {
         throw new ApiError(400, "Akun Telegram yang dipilih belum terhubung.");
       }
+    }
+
+    const accounts = target === "all"
+      ? await this.filterAvailableAccounts(selectedAccounts)
+      : selectedAccounts;
+
+    if (!accounts.length) {
+      throw new ApiError(409, "Semua akun Telegram target sedang dipakai broadcast aktif. Hentikan/tunggu broadcast selesai sebelum batch add group.");
     }
 
     const results: BatchAccountResult[] = [];
@@ -412,8 +726,7 @@ class GroupService {
         continue;
       }
 
-      const session = decryptText(account.encryptedSession);
-      const client = await mtprotoClient.connectFromSession(session);
+      const client = await this.connectAccount(account);
 
       try {
         let created = 0;
@@ -491,6 +804,8 @@ class GroupService {
           notFound,
           joinFailed
         });
+      } catch (error) {
+        throwTelegramApiError(error);
       } finally {
         await client.disconnect();
       }
@@ -586,22 +901,13 @@ class GroupService {
       throw new ApiError(400, "Invalid folder link. Use format https://t.me/addlist/<slug>");
     }
 
-    const account = accountId
-      ? await prisma.telegramAccount.findUnique({ where: { id: accountId } })
-      : await prisma.telegramAccount.findFirst({
-          where: {
-            status: TelegramConnectionStatus.CONNECTED,
-            encryptedSession: { not: null }
-          },
-          orderBy: { updatedAt: "desc" }
-        });
+    const account = await this.findConnectedAccount(accountId);
 
     if (!account?.encryptedSession) {
       throw new ApiError(400, "No connected Telegram account/session found");
     }
 
-    const session = decryptText(account.encryptedSession);
-    const client = await mtprotoClient.connectFromSession(session);
+    const client = await this.connectAccount(account);
 
     try {
       const invite = await client.invoke(new Api.chatlists.CheckChatlistInvite({ slug }));
@@ -651,6 +957,8 @@ class GroupService {
         updated,
         skipped
       };
+    } catch (error) {
+      throwTelegramApiError(error);
     } finally {
       await client.disconnect();
     };
@@ -662,22 +970,13 @@ class GroupService {
       throw new ApiError(400, "Link tidak valid. Gunakan @username, link group (t.me/...), atau link addlist (t.me/addlist/...).");
     }
 
-    const account = accountId
-      ? await prisma.telegramAccount.findUnique({ where: { id: accountId } })
-      : await prisma.telegramAccount.findFirst({
-          where: {
-            status: TelegramConnectionStatus.CONNECTED,
-            encryptedSession: { not: null }
-          },
-          orderBy: { updatedAt: "desc" }
-        });
+    const account = await this.findConnectedAccount(accountId);
 
     if (!account?.encryptedSession) {
       throw new ApiError(400, "Tidak ada akun Telegram yang terhubung. Hubungkan akun terlebih dahulu di menu Session.");
     }
 
-    const session = decryptText(account.encryptedSession);
-    const client = await mtprotoClient.connectFromSession(session);
+    const client = await this.connectAccount(account);
 
     try {
       if (parsed.type === "addlist") {
@@ -839,6 +1138,8 @@ class GroupService {
         skipped: status.status === "skipped" ? 1 : 0,
         total: 1
       };
+    } catch (error) {
+      return throwTelegramApiError(error);
     } finally {
       await client.disconnect();
     }

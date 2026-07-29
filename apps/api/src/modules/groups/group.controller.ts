@@ -13,11 +13,21 @@ class GroupController {
       if (!accountId) {
         throw new ApiError(400, "accountId wajib diisi untuk sync group");
       }
-      await groupService.syncFromTelegram(accountId);
+      await groupService.startSyncFromTelegram(accountId);
     }
 
     const data = await groupService.list(search, tag, accountId);
     res.json(data);
+  }
+
+  async startSync(req: Request, res: Response) {
+    const result = await groupService.startSyncFromTelegram(req.body.accountId);
+    res.status(202).json(result);
+  }
+
+  async syncStatus(req: Request, res: Response) {
+    const result = groupService.getSyncStatus(req.params.accountId);
+    res.json(result);
   }
 
   async create(req: Request, res: Response) {

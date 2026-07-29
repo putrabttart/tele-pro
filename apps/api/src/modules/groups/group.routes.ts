@@ -10,6 +10,7 @@ import {
   createGroupSchema,
   importGroupFolderLinkSchema,
   importGroupTextSchema,
+  syncGroupSchema,
   updateGroupSchema
 } from "./group.schema";
 
@@ -26,6 +27,14 @@ groupRoutes.get("/", asyncHandler(async (req, res) => {
 
 groupRoutes.post("/", validateBody(createGroupSchema), asyncHandler(async (req, res) => {
   await groupController.create(req, res);
+}));
+
+groupRoutes.post("/sync", validateBody(syncGroupSchema), asyncHandler(async (req, res) => {
+  await groupController.startSync(req, res);
+}));
+
+groupRoutes.get("/sync/:accountId", asyncHandler(async (req, res) => {
+  await groupController.syncStatus(req, res);
 }));
 
 groupRoutes.patch("/batch-status", validateBody(batchUpdateGroupStatusSchema), asyncHandler(async (req, res) => {

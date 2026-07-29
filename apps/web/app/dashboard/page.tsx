@@ -1451,11 +1451,43 @@ export default function DashboardPage() {
     }
 
     await withBusyAction("group-sync", async () => {
-      const groupsRes = await apiFetch<GroupItem[]>(`/api/groups?accountId=${groupAccountId}&sync=1`);
+      await apiFetch<{
+        accountId: string;
+        status: "running" | "completed" | "failed";
+      }>("/api/groups/sync", {
+        method: "POST",
+        body: JSON.stringify({ accountId: groupAccountId })
+      });
+
+      let completed = false;
+      for (let attempt = 0; attempt < 45; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+
+        const status = await apiFetch<{
+          status: "idle" | "running" | "completed" | "failed";
+          error?: string;
+          result?: { total: number; created: number; updated: number; skipped: number; removed: number };
+        }>(`/api/groups/sync/${groupAccountId}`);
+
+        if (status.status === "failed") {
+          throw new Error(status.error || "Sync group gagal.");
+        }
+
+        if (status.status === "completed") {
+          completed = true;
+          break;
+        }
+      }
+
+      if (!completed) {
+        throw new Error("Sync group masih berjalan lebih dari 90 detik. Daftar group akan diperbarui saat refresh berikutnya.");
+      }
+
+      const groupsRes = await apiFetch<GroupItem[]>(`/api/groups?accountId=${groupAccountId}`);
       setGroups(groupsRes);
       if (!silent) {
         const labelSuffix = groupAccountLabel ? ` (${groupAccountLabel})` : "";
-        setNotice(`Group disinkronkan dari Telegram${labelSuffix}`);
+        setNotice(`Group disinkronkan dari Telegram${labelSuffix}. ${groupsRes.length} group aktif di akun ini.`);
       }
     });
   };

@@ -5,6 +5,8 @@ const joinApiUrl = (baseUrl: string, path: string) => {
   return `${baseUrl.replace(/\/$/, "")}${path}`;
 };
 
+class ApiNetworkError extends Error {}
+
 export const getApiBaseUrl = () => {
   if (typeof window === "undefined") {
     return configuredApiUrl;
@@ -47,6 +49,26 @@ const parseApiErrorMessage = async (response: Response) => {
     return `${base}: ${details}`;
   } catch {
     return raw.length > 300 ? `${raw.slice(0, 300)}...` : raw;
+  }
+};
+
+const formatFetchFailureMessage = (path: string, apiUrl: string, error: unknown) => {
+  const target = joinApiUrl(apiUrl, path);
+  const details = error instanceof Error ? error.message : String(error);
+  const isHttpsPage = typeof window !== "undefined" && window.location.protocol === "https:";
+  const isHttpApi = /^http:\/\//i.test(target);
+  const hint = isHttpsPage && isHttpApi
+    ? "Halaman HTTPS tidak bisa memanggil API HTTP. Gunakan URL API HTTPS/tunnel, atau kosongkan NEXT_PUBLIC_API_URL hanya jika rewrite Next sudah mengarah ke API yang benar."
+    : "Pastikan API server aktif, URL API benar, dan tunnel/proxy tidak putus saat request berjalan lama.";
+
+  return `Tidak bisa menghubungi API untuk ${path}. ${hint}${details ? ` Detail: ${details}` : ""}`;
+};
+
+const fetchApi = async (apiUrl: string, path: string, init?: RequestInit) => {
+  try {
+    return await fetch(joinApiUrl(apiUrl, path), init);
+  } catch (error) {
+    throw new ApiNetworkError(formatFetchFailureMessage(path, apiUrl, error));
   }
 };
 
@@ -105,7 +127,7 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
 
   const apiUrl = getApiBaseUrl();
 
-  let response = await fetch(joinApiUrl(apiUrl, path), {
+  let response = await fetchApi(apiUrl, path, {
     ...init,
     headers
   });
@@ -115,7 +137,7 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
     const refreshToken = getRefreshToken();
     if (refreshToken) {
       try {
-        const refreshRes = await fetch(joinApiUrl(apiUrl, "/api/auth/refresh"), {
+        const refreshRes = await fetchApi(apiUrl, "/api/auth/refresh", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ refresh_token: refreshToken })
@@ -131,12 +153,16 @@ export const apiFetch = async <T>(path: string, init?: RequestInit): Promise<T> 
 
           // Retry original request with new token
           headers.set("Authorization", `Bearer ${refreshData.access_token}`);
-          response = await fetch(joinApiUrl(apiUrl, path), { ...init, headers });
+          response = await fetchApi(apiUrl, path, { ...init, headers });
         } else {
           clearToken();
           throw new Error("Session expired. Silakan login ulang.");
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof ApiNetworkError) {
+          throw error;
+        }
+
         clearToken();
         throw new Error("Session expired. Silakan login ulang.");
       }

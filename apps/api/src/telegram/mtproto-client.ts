@@ -12,6 +12,82 @@ type PendingLogin = {
 const pendingLogins = new Map<string, PendingLogin>();
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const CLIENT_CONNECT_TIMEOUT_MS = 30_000;
+
+export class TelegramApiError extends Error {
+  originalMessage?: string;
+
+  constructor(message: string, originalMessage?: string) {
+    super(message);
+    this.name = "TelegramApiError";
+    this.originalMessage = originalMessage;
+  }
+}
+
+export const classifyTelegramErrorMessage = (message: string) => {
+  if (/AUTH_KEY_DUPLICATED/i.test(message)) {
+    return "Akun Telegram ini sedang dipakai koneksi lain, biasanya broadcast aktif atau proses sebelumnya belum selesai. Hentikan broadcast/tunggu beberapa detik lalu coba lagi.";
+  }
+
+  if (/AUTH_KEY_UNREGISTERED|SESSION_EXPIRED|SESSION_REVOKED/i.test(message)) {
+    return "Sesi Telegram sudah tidak valid. Disconnect akun lalu login ulang.";
+  }
+
+  if (/PHONE_CODE_INVALID/i.test(message)) {
+    return "Kode OTP salah. Periksa lagi kode dari Telegram.";
+  }
+
+  if (/PHONE_CODE_EXPIRED/i.test(message)) {
+    return "Kode OTP sudah expired. Request OTP ulang.";
+  }
+
+  if (/FLOOD_WAIT/i.test(message) || /a wait of \d+ seconds/i.test(message)) {
+    const waitMatch = message.match(/FLOOD_WAIT_(\d+)/i) ?? message.match(/a wait of (\d+) seconds/i);
+    const waitSuffix = waitMatch?.[1] ? ` Tunggu sekitar ${waitMatch[1]} detik sebelum mencoba lagi.` : " Coba lagi nanti.";
+    return `Telegram membatasi request akun ini.${waitSuffix}`;
+  }
+
+  if (/USERNAME_NOT_OCCUPIED|USERNAME_INVALID/i.test(message)) {
+    return "Username group tidak ditemukan atau tidak valid. Periksa kembali username/link Telegram.";
+  }
+
+  if (/INVITE_HASH_EXPIRED|INVITE_HASH_INVALID/i.test(message)) {
+    return "Link invite group sudah expired atau tidak valid. Minta link invite baru dari admin group.";
+  }
+
+  if (/TIMEOUT|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|NETWORK|socket hang up/i.test(message)) {
+    return "Koneksi server ke Telegram bermasalah/timeout. Coba lagi setelah koneksi stabil.";
+  }
+
+  return null;
+};
+
+export const toTelegramApiError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  const friendlyMessage = classifyTelegramErrorMessage(message);
+
+  if (friendlyMessage) {
+    return new TelegramApiError(friendlyMessage, message);
+  }
+
+  return error;
+};
+
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new TelegramApiError(message, "TIMEOUT")), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+};
 
 const createClient = (sessionString = "") => {
   return new TelegramClient(
@@ -21,6 +97,7 @@ const createClient = (sessionString = "") => {
     {
       connectionRetries: 3,
       autoReconnect: false,
+      timeout: CLIENT_CONNECT_TIMEOUT_MS,
       baseLogger: new Logger(LogLevel.NONE)
     }
   );
@@ -41,7 +118,11 @@ const ensureTelegramConfig = () => {
 const connectWithRetry = async (client: TelegramClient, maxRetries = 3): Promise<void> => {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      await client.connect();
+      await withTimeout(
+        client.connect(),
+        CLIENT_CONNECT_TIMEOUT_MS,
+        "Koneksi ke Telegram timeout. Periksa koneksi server dan coba lagi."
+      );
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
@@ -50,7 +131,7 @@ const connectWithRetry = async (client: TelegramClient, maxRetries = 3): Promise
         await sleep(5000 * (attempt + 1));
         continue;
       }
-      throw error;
+      throw toTelegramApiError(error);
     }
   }
 };

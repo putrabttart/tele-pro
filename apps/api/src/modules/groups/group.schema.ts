@@ -21,6 +21,10 @@ export const batchUpdateGroupStatusSchema = z.object({
   isActive: z.boolean()
 });
 
+export const syncGroupSchema = z.object({
+  accountId: z.string().min(1)
+});
+
 export const importGroupTextSchema = z.object({
   content: z.string().min(1),
   defaultTags: z.array(z.string().min(1)).default([])
