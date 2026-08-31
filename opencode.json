@@ -8,8 +8,8 @@
         "apiKey": "sk-dd280c071621651a-xby4wm-1e189a5b"
       },
       "models": {
-        "cx/gpt-5.5-xhigh": {
-          "name": "cx/gpt-5.5-xhigh",
+        "ghrocx/ghrocx-2/opus-5": {
+          "name": "ghrocx/ghrocx-2/opus-5",
           "modalities": {
             "input": [
               "text",
@@ -23,12 +23,12 @@
       }
     }
   },
-  "model": "9router/cx/gpt-5.5-xhigh",
+  "model": "9router/ghrocx/ghrocx-2/opus-5",
   "agent": {
     "explorer": {
       "description": "Fast explorer subagent for codebase exploration",
       "mode": "subagent",
-      "model": "9router/kr/claude-sonnet-4.5-thinking"
+      "model": "9router/gsk/model-id"
     }
   }
 }

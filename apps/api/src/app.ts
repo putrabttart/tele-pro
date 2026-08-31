@@ -19,7 +19,7 @@ app.use(
   "/api",
   rateLimit({
     windowMs: 60 * 1000,
-    max: 120,
+    max: env.API_RATE_LIMIT_MAX,
     standardHeaders: true,
     legacyHeaders: false
   })

@@ -18,6 +18,7 @@ const envSchema = z.object({
   SESSION_ENCRYPTION_KEY: z.string().min(32),
   TELEGRAM_API_ID: z.coerce.number().optional(),
   TELEGRAM_API_HASH: z.string().optional(),
+  API_RATE_LIMIT_MAX: z.coerce.number().default(600),
   MIN_SPACING_MS: z.coerce.number().default(5000)
 });
 

@@ -5,26 +5,27 @@ const dotenv = require("dotenv");
 const envPath = path.resolve(__dirname, "../../.env");
 const result = dotenv.config({ path: envPath });
 
-// Debug: tampilkan saat build supaya bisa verifikasi
+const apiInternalUrl = (process.env.API_INTERNAL_URL ?? "http://127.0.0.1:4000").replace(/\/$/, "");
+
 console.log("[next.config] Loading env from:", envPath);
 console.log("[next.config] dotenv parse error:", result.error ?? "none");
-console.log("[next.config] NEXT_PUBLIC_API_URL =", process.env.NEXT_PUBLIC_API_URL ?? "(NOT SET)");
+console.log("[next.config] NEXT_PUBLIC_API_URL =", process.env.NEXT_PUBLIC_API_URL || "(empty -> same-origin rewrite)");
+console.log("[next.config] API_INTERNAL_URL =", apiInternalUrl);
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+    NEXT_PUBLIC_API_TIMEOUT_MS: process.env.NEXT_PUBLIC_API_TIMEOUT_MS,
     NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
     NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   },
   async rewrites() {
-    const apiUrl = process.env.API_INTERNAL_URL ?? "http://127.0.0.1:4000";
-
     return [
       {
         source: "/api/:path*",
-        destination: `${apiUrl}/api/:path*`,
+        destination: `${apiInternalUrl}/api/:path*`,
       },
     ];
   },

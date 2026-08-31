@@ -1,4 +1,6 @@
-const configuredApiUrl = process.env.NEXT_PUBLIC_API_URL ?? "";
+const configuredApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? "").trim();
+
+const REQUEST_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS ?? 60000);
 
 const joinApiUrl = (baseUrl: string, path: string) => {
   if (!baseUrl || baseUrl === "/") return path;
@@ -55,20 +57,36 @@ const parseApiErrorMessage = async (response: Response) => {
 const formatFetchFailureMessage = (path: string, apiUrl: string, error: unknown) => {
   const target = joinApiUrl(apiUrl, path);
   const details = error instanceof Error ? error.message : String(error);
+  const isTimeout = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
   const isHttpsPage = typeof window !== "undefined" && window.location.protocol === "https:";
   const isHttpApi = /^http:\/\//i.test(target);
+
+  if (isTimeout) {
+    return `Request ke ${path} melebihi batas waktu ${Math.round(REQUEST_TIMEOUT_MS / 1000)} detik. API mungkin masih memproses atau reverse proxy memutus koneksi.`;
+  }
+
   const hint = isHttpsPage && isHttpApi
-    ? "Halaman HTTPS tidak bisa memanggil API HTTP. Gunakan URL API HTTPS/tunnel, atau kosongkan NEXT_PUBLIC_API_URL hanya jika rewrite Next sudah mengarah ke API yang benar."
-    : "Pastikan API server aktif, URL API benar, dan tunnel/proxy tidak putus saat request berjalan lama.";
+    ? "Halaman HTTPS tidak bisa memanggil API HTTP. Kosongkan NEXT_PUBLIC_API_URL agar memakai rewrite same-origin, atau pakai URL API HTTPS."
+    : "Pastikan API server aktif, URL API benar, dan reverse proxy tidak memutus request yang berjalan lama.";
 
   return `Tidak bisa menghubungi API untuk ${path}. ${hint}${details ? ` Detail: ${details}` : ""}`;
 };
 
 const fetchApi = async (apiUrl: string, path: string, init?: RequestInit) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+
   try {
-    return await fetch(joinApiUrl(apiUrl, path), init);
+    return await fetch(joinApiUrl(apiUrl, path), {
+      ...init,
+      signal: init?.signal ?? controller.signal
+    });
   } catch (error) {
     throw new ApiNetworkError(formatFetchFailureMessage(path, apiUrl, error));
+  } finally {
+    clearTimeout(timeout);
   }
 };
 
