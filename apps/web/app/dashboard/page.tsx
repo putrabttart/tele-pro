@@ -101,6 +101,7 @@ type WeeklySeriesPoint = {
 
 const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const weekdayLabels = ["M", "T", "W", "T", "F", "S", "S"];
+const MAX_BROADCAST_CYCLES = 2880;
 
 const compactNumberFormatter = new Intl.NumberFormat("id-ID", {
   notation: "compact",
@@ -118,6 +119,36 @@ const formatCompactNumber = (value: number) => {
 const formatTrend = (value: number) => {
   const safeValue = Number.isFinite(value) ? value : 0;
   return `${safeValue >= 0 ? "+" : ""}${percentNumberFormatter.format(safeValue)}%`;
+};
+
+const formatDateTime = (value: string | Date | null | undefined) => {
+  if (!value) return "-";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("id-ID", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+};
+
+const getRunStartDate = (run: Pick<RunItem, "startedAt" | "createdAt">) => {
+  return run.startedAt ? new Date(run.startedAt) : null;
+};
+
+const getRunTargetEndDate = (run: Pick<RunItem, "startedAt" | "totalDurationHours">) => {
+  if (!run.startedAt || !run.totalDurationHours) return null;
+  return new Date(new Date(run.startedAt).getTime() + run.totalDurationHours * 60 * 60 * 1000);
+};
+
+const getRunEndLabel = (run: Pick<RunItem, "finishedAt" | "startedAt" | "totalDurationHours" | "intervalMinutes">) => {
+  if (run.finishedAt) return `Selesai aktual: ${formatDateTime(run.finishedAt)}`;
+  const targetEnd = getRunTargetEndDate(run);
+  if (targetEnd) return `Target selesai: ${formatDateTime(targetEnd)}`;
+  if (!run.totalDurationHours || !run.intervalMinutes) return "Target selesai: setelah 1x kirim";
+  return "Target selesai: menunggu mulai";
 };
 
 const calculateDeltaPercent = (current: number, previous: number) => {
@@ -166,6 +197,16 @@ const parseRunReason = (reason: string | null): ParsedReason => {
   }
 
   const lower = reason.toLowerCase();
+
+  if (lower.includes("session invalid") || lower.includes("sesi expired") || lower.includes("session expired") || lower.includes("session revoked")) {
+    return {
+      title: "Sesi Telegram Expired",
+      description: "Sesi login Telegram untuk akun ini sudah kadaluarsa atau dicabut, sehingga broadcast dihentikan sebelum mengirim pesan.",
+      suggestion: "Buka menu Session Telegram, disconnect jika perlu, lalu Request OTP dan Verify OTP ulang untuk akun tersebut.",
+      icon: "bi-phone-vibrate",
+      severity: "critical"
+    };
+  }
 
   if (lower.includes("no connected telegram account") || lower.includes("no connected telegram")) {
     return {
@@ -692,6 +733,7 @@ const runStatusBadgeClass = (status: RunItem["status"]) => {
 const runStatusLabel = (run: RunItem): { label: string; sublabel: string; icon: string } => {
   const hasBatch = run.totalDurationHours && run.intervalMinutes;
   const maxCycles = hasBatch ? Math.max(1, Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!)) : null;
+  const displayedMaxCycles = maxCycles ? Math.min(MAX_BROADCAST_CYCLES, maxCycles) : null;
 
   if (run.status === "RUNNING") {
     // Check if it's waiting between cycles (reason contains "Waiting")
@@ -699,7 +741,7 @@ const runStatusLabel = (run: RunItem): { label: string; sublabel: string; icon: 
     if (hasBatch && isWaiting) {
       return {
         label: "Menunggu Siklus",
-        sublabel: `Siklus ${run.completedCycles}/${maxCycles} selesai, menunggu ${run.intervalMinutes}m`,
+        sublabel: `Siklus ${run.completedCycles}/${displayedMaxCycles} selesai, menunggu ${run.intervalMinutes}m`,
         icon: "bi-hourglass-split"
       };
     }
@@ -707,7 +749,7 @@ const runStatusLabel = (run: RunItem): { label: string; sublabel: string; icon: 
     return {
       label: "Sedang Berjalan",
       sublabel: hasBatch
-        ? `Siklus ${run.completedCycles + 1}/${maxCycles} sedang mengirim ke ${run.pendingCount} group`
+        ? `Siklus ${run.completedCycles + 1}/${displayedMaxCycles} sedang mengirim ke ${run.pendingCount} group`
         : `Mengirim ke ${run.pendingCount} group tersisa`,
       icon: "bi-broadcast"
     };
@@ -1770,6 +1812,12 @@ export default function DashboardPage() {
       }
       if (!durationVal && intervalVal) {
         throw new Error("Jika interval diisi, durasi total broadcast juga harus diisi.");
+      }
+      if (durationVal && intervalVal) {
+        const cycles = Math.floor((durationVal * 60) / intervalVal);
+        if (cycles > MAX_BROADCAST_CYCLES) {
+          throw new Error(`Terlalu banyak siklus (${cycles}x). Maksimal ${MAX_BROADCAST_CYCLES} siklus. Naikkan interval atau kurangi durasi.`);
+        }
       }
 
       const basePayload = {
@@ -2932,11 +2980,15 @@ export default function DashboardPage() {
           </div>
 
           {estimatedCycles !== null && estimatedCycles > 0 ? (
-            <div className={`alert mt-3 mb-0 ${estimatedCycles > 50 ? "alert-warning" : "alert-info"}`}>
-              <i className={`bi ${estimatedCycles > 50 ? "bi-exclamation-triangle" : "bi-info-circle"} me-1`}></i>
+            <div className={`alert mt-3 mb-0 ${estimatedCycles > MAX_BROADCAST_CYCLES ? "alert-danger" : estimatedCycles > 50 ? "alert-warning" : "alert-info"}`}>
+              <i className={`bi ${estimatedCycles > MAX_BROADCAST_CYCLES || estimatedCycles > 50 ? "bi-exclamation-triangle" : "bi-info-circle"} me-1`}></i>
               <strong>Estimasi:</strong> Pesan akan dikirim ke semua group sebanyak <strong>~{estimatedCycles} kali</strong> selama {runForm.totalDurationHours} jam
               (setiap {Number(runForm.intervalMinutes) >= 60 ? `${Number(runForm.intervalMinutes) / 60} jam` : `${runForm.intervalMinutes} menit`}).
-              {estimatedCycles > 50 ? (
+              {estimatedCycles > MAX_BROADCAST_CYCLES ? (
+                <div className="mt-1 small">
+                  <strong>Melebihi batas:</strong> Maksimal {MAX_BROADCAST_CYCLES} siklus. Untuk durasi 1 bulan, gunakan interval minimal 15 menit.
+                </div>
+              ) : estimatedCycles > 50 ? (
                 <div className="mt-1 small">
                   <strong>Peringatan:</strong> Jumlah siklus sangat banyak ({estimatedCycles}x). Pastikan interval dalam <strong>menit</strong> (bukan jam). Contoh: 1 jam = 60 menit.
                 </div>
@@ -3062,6 +3114,7 @@ export default function DashboardPage() {
                   || isBusy("broadcast-run")
                   || syncing
                   || (Boolean(runForm.totalDurationHours) !== Boolean(runForm.intervalMinutes))
+                  || Boolean(estimatedCycles && estimatedCycles > MAX_BROADCAST_CYCLES)
                   || Boolean(runForm.accountId && busyAccounts.find((b) => b.accountId === runForm.accountId))
                 }
               >
@@ -3222,7 +3275,7 @@ export default function DashboardPage() {
 
     const getEstimatedTotalCycles = (run: RunItem) => {
       if (!run.totalDurationHours || !run.intervalMinutes) return null;
-      return Math.max(1, Math.floor((run.totalDurationHours * 60) / run.intervalMinutes));
+      return Math.min(MAX_BROADCAST_CYCLES, Math.max(1, Math.floor((run.totalDurationHours * 60) / run.intervalMinutes)));
     };
 
     return (
@@ -3238,12 +3291,17 @@ export default function DashboardPage() {
               const accountLabel = getAccountLabel(run.requestedAccountId);
               const estimatedCyclesTotal = getEstimatedTotalCycles(run);
               const hasBatch = run.totalDurationHours && run.intervalMinutes;
+              const startDate = getRunStartDate(run);
+              const targetEndDate = getRunTargetEndDate(run);
 
               return (
                 <div className="tbm-monitor-card" key={run.id}>
                   <div className="tbm-monitor-card-header">
                     <div>
                       <div className="tbm-monitor-card-label">{run.label || `Run ${run.id.slice(0, 8)}`}</div>
+                      {run.label ? (
+                        <div className="text-secondary small">Nama Broadcast</div>
+                      ) : null}
                       <div className="tbm-monitor-card-meta">
                         <span className={runStatusBadgeClass(run.status)}>
                           <i className={`${statusInfo.icon} me-1`}></i>
@@ -3301,6 +3359,15 @@ export default function DashboardPage() {
                   )}
 
                   <div className="tbm-monitor-card-detail small">{info.detail}</div>
+
+                  <div className="tbm-monitor-batch-info small">
+                    <i className="bi bi-calendar-event me-1"></i>
+                    Mulai: {startDate ? formatDateTime(startDate) : "menunggu worker"}
+                  </div>
+                  <div className="tbm-monitor-batch-info small">
+                    <i className="bi bi-calendar-check me-1"></i>
+                    {targetEndDate ? `Target selesai: ${formatDateTime(targetEndDate)}` : "Target selesai: setelah 1x kirim"}
+                  </div>
 
                   <div className="tbm-monitor-counters">
                     <div className="tbm-monitor-counter tbm-counter-sent">
@@ -3434,12 +3501,15 @@ export default function DashboardPage() {
                     const info = parseRunMode(run.requestedTemplateIds ?? []);
                     const statusInfo = runStatusLabel(run);
                     const accountLabel = getAccountLabel(run.requestedAccountId);
+                    const startDate = getRunStartDate(run);
 
                     return (
                       <tr key={run.id}>
                         <td data-label="Nama">
                           <div className="fw-semibold" style={{ fontSize: "0.85rem" }}>{run.label || run.id.slice(0, 10)}</div>
-                          <div className="text-secondary" style={{ fontSize: "0.72rem" }}>{new Date(run.createdAt).toLocaleString("id-ID")}</div>
+                          {run.label ? <div className="text-secondary" style={{ fontSize: "0.72rem" }}>Nama Broadcast</div> : null}
+                          <div className="text-secondary" style={{ fontSize: "0.72rem" }}>Dibuat: {formatDateTime(run.createdAt)}</div>
+                          <div className="text-secondary" style={{ fontSize: "0.72rem" }}>Mulai: {startDate ? formatDateTime(startDate) : "belum mulai"}</div>
                         </td>
                         <td data-label="Mode / Pesan">
                           <span className="badge tbm-status-neutral me-1">{info.mode}</span>
@@ -3464,13 +3534,16 @@ export default function DashboardPage() {
                         <td data-label="Failed">{run.failedCount}</td>
                         <td data-label="Info">
                           {hasBatch ? (
-                            <span className="small">
-                              <i className="bi bi-arrow-repeat me-1"></i>
-                              {run.totalDurationHours}j / {run.intervalMinutes}m
-                              {run.completedCycles ? ` (${run.completedCycles}x)` : ""}
-                            </span>
+                            <div className="small">
+                              <div>
+                                <i className="bi bi-arrow-repeat me-1"></i>
+                                {run.totalDurationHours}j / {run.intervalMinutes}m
+                                {run.completedCycles ? ` (${run.completedCycles}x)` : ""}
+                              </div>
+                              <div className="text-secondary">{getRunEndLabel(run)}</div>
+                            </div>
                           ) : (
-                            <span className="text-secondary small">1x kirim</span>
+                            <div className="text-secondary small">{getRunEndLabel(run)}</div>
                           )}
                           {run.reason ? (
                             <div className="tbm-reason-detail mt-1" title={run.reason}>

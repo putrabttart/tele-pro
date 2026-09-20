@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const runBaseSchema = z.object({
+  label: z.string().trim().max(120).optional(),
   settingId: z.string().optional(),
   scheduleId: z.string().optional(),
   accountId: z.string().optional(),

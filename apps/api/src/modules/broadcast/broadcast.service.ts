@@ -2,12 +2,16 @@ import { RunStatus, SendMode } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { ApiError } from "../../utils/api-error";
 import { logActivity } from "../../utils/logger";
+import { notifyTelegram } from "../../utils/telegram-notifier";
 import { parseForwardMessageLink, parseForwardSourceLink } from "../../utils/telegram-links";
 
 const MODE_MARKER_PREFIX = "__TBM_MODE:";
 const TEXT_MARKER_PREFIX = "__TBM_TEXT:";
 const FORWARD_SOURCE_MARKER_PREFIX = "__TBM_FORWARD_SOURCE:";
 const FORWARD_MESSAGE_MARKER_PREFIX = "__TBM_FORWARD_MESSAGE_ID:";
+const MAX_BROADCAST_CYCLES = 2880; // 30 days at 15-minute intervals
+
+const formatRunName = (run: { id: string; label: string | null }) => run.label || `Run ${run.id.slice(0, 8)}`;
 
 type CreateRunPayload = {
   label?: string;
@@ -99,8 +103,8 @@ class BroadcastService {
     // Validasi: interval terlalu kecil bisa menyebabkan terlalu banyak siklus
     if (payload.totalDurationHours && payload.intervalMinutes) {
       const estimatedCycles = Math.floor((payload.totalDurationHours * 60) / payload.intervalMinutes);
-      if (estimatedCycles > 500) {
-        throw new ApiError(400, `Terlalu banyak siklus (${estimatedCycles}x). Periksa interval — nilai dalam MENIT (contoh: 1 jam = 60 menit). Maksimal 500 siklus.`);
+      if (estimatedCycles > MAX_BROADCAST_CYCLES) {
+        throw new ApiError(400, `Terlalu banyak siklus (${estimatedCycles}x). Periksa interval — nilai dalam MENIT (contoh: 1 jam = 60 menit). Maksimal ${MAX_BROADCAST_CYCLES} siklus.`);
       }
       if (payload.intervalMinutes < 5) {
         throw new ApiError(400, `Interval terlalu kecil (${payload.intervalMinutes} menit). Minimum interval adalah 5 menit untuk menghindari spam.`);
@@ -233,17 +237,27 @@ class BroadcastService {
   }
 
   async pauseRun(runId: string, reason = "Paused by user") {
-    return prisma.broadcastRun.update({
+    const run = await prisma.broadcastRun.update({
       where: { id: runId },
       data: {
         status: RunStatus.PAUSED,
         reason
       }
     });
+
+    await notifyTelegram("Broadcast dijeda", [
+      `Nama: ${formatRunName(run)}`,
+      `Run ID: ${run.id}`,
+      `Alasan: ${reason}`,
+      `Sent: ${run.sentCount}`,
+      `Failed: ${run.failedCount}`
+    ]);
+
+    return run;
   }
 
   async resumeRun(runId: string) {
-    return prisma.broadcastRun.update({
+    const run = await prisma.broadcastRun.update({
       where: { id: runId },
       data: {
         status: RunStatus.PENDING,
@@ -251,6 +265,16 @@ class BroadcastService {
         pausedUntil: null
       }
     });
+
+    await notifyTelegram("Broadcast dilanjutkan", [
+      `Nama: ${formatRunName(run)}`,
+      `Run ID: ${run.id}`,
+      `Siklus selesai: ${run.completedCycles}`,
+      `Sent: ${run.sentCount}`,
+      `Failed: ${run.failedCount}`
+    ]);
+
+    return run;
   }
 
   async cancelRun(runId: string) {
@@ -263,7 +287,7 @@ class BroadcastService {
       throw new ApiError(400, "Cannot cancel a run that is already completed or failed");
     }
 
-    return prisma.broadcastRun.update({
+    const cancelled = await prisma.broadcastRun.update({
       where: { id: runId },
       data: {
         status: RunStatus.FAILED,
@@ -271,6 +295,16 @@ class BroadcastService {
         finishedAt: new Date()
       }
     });
+
+    await notifyTelegram("Broadcast dihentikan", [
+      `Nama: ${formatRunName(cancelled)}`,
+      `Run ID: ${cancelled.id}`,
+      "Alasan: Dihentikan oleh user",
+      `Sent: ${cancelled.sentCount}`,
+      `Failed: ${cancelled.failedCount}`
+    ]);
+
+    return cancelled;
   }
 
   async deleteRun(runId: string) {

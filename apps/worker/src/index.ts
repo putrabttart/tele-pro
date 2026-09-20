@@ -1,10 +1,12 @@
 import { startBroadcastWorker, gracefulShutdown } from "./jobs/broadcast.worker";
 import { startLogRetentionWorker } from "./jobs/log-retention.worker";
 import { startSchedulerWorker } from "./jobs/scheduler.worker";
+import { startTelegramCommandWorker } from "./jobs/telegram-command.worker";
 
 const schedulerTimer = startSchedulerWorker();
 const broadcastTimer = startBroadcastWorker();
 const logRetentionTimer = startLogRetentionWorker();
+const telegramCommandTimer = startTelegramCommandWorker();
 
 let shuttingDown = false;
 
@@ -18,6 +20,7 @@ const handleShutdown = async (signal: string) => {
   clearInterval(schedulerTimer);
   clearInterval(broadcastTimer);
   clearInterval(logRetentionTimer);
+  if (telegramCommandTimer) clearInterval(telegramCommandTimer);
 
   await gracefulShutdown();
 

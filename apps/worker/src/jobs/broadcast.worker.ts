@@ -4,6 +4,7 @@ import { prisma, dbRetry } from "../config/prisma";
 import { classifyError, mtprotoSender } from "../telegram/mtproto-sender";
 import type { ErrorSeverity } from "../telegram/mtproto-sender";
 import { logActivity } from "../utils/logger";
+import { notifyTelegram } from "../utils/telegram-notifier";
 import { randomInt, shuffle } from "../utils/random";
 import { sleep } from "../utils/sleep";
 
@@ -23,6 +24,7 @@ const MIN_MESSAGES_FOR_RATIO_CHECK = 10; // Only check ratio after N messages
 const COOLDOWN_AFTER_CYCLE_MS = 5_000; // 5s cooldown between cycles (minimum)
 const STALE_RUN_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 const INTERVAL_CHECK_MS = 10_000; // Check every 10s during interval wait
+const MAX_BROADCAST_CYCLES = 2880; // 30 days at 15-minute intervals
 
 // Progressive delay: increase delay after consecutive issues
 const PROGRESSIVE_DELAY_MULTIPLIER = 1.5; // Multiply delay by this after each fail
@@ -61,9 +63,67 @@ type CycleDetail = {
   failReason?: string;
 };
 
+type NotifyRunSummary = {
+  id: string;
+  label: string | null;
+  totalDurationHours: number | null;
+  intervalMinutes: number | null;
+  completedCycles: number;
+  sentCount: number;
+  failedCount: number;
+  requestedAccountId: string | null;
+};
+
 // ═══════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════
+
+const formatRunName = (run: { id: string; label: string | null }) => run.label || `Run ${run.id.slice(0, 8)}`;
+
+const formatDateTime = (date: Date | null | undefined) => date
+  ? date.toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })
+  : "-";
+
+const getRunSummary = async (runId: string): Promise<NotifyRunSummary | null> => dbRetry(() =>
+  prisma.broadcastRun.findUnique({
+    where: { id: runId },
+    select: {
+      id: true,
+      label: true,
+      totalDurationHours: true,
+      intervalMinutes: true,
+      completedCycles: true,
+      sentCount: true,
+      failedCount: true,
+      requestedAccountId: true
+    }
+  })
+).catch(() => null);
+
+const getAccountLabel = async (accountId: string | null | undefined) => {
+  if (!accountId) return "Auto-select";
+  const account = await dbRetry(() =>
+    prisma.telegramAccount.findUnique({
+      where: { id: accountId },
+      select: { label: true, phone: true }
+    })
+  ).catch(() => null);
+
+  return account ? `${account.label} (${account.phone})` : accountId.slice(0, 8);
+};
+
+const notifyBroadcastFailed = async (runId: string, message: string) => {
+  const run = await getRunSummary(runId);
+  await notifyTelegram("Broadcast gagal/berhenti", [
+    run ? `Nama: ${formatRunName(run)}` : `Run ID: ${runId}`,
+    run ? `Run ID: ${run.id}` : null,
+    `Alasan: ${message}`,
+    run ? `Akun: ${await getAccountLabel(run.requestedAccountId)}` : null,
+    run ? `Siklus selesai: ${run.completedCycles}` : null,
+    run ? `Sent: ${run.sentCount}` : null,
+    run ? `Failed: ${run.failedCount}` : null
+  ]);
+};
 
 const markRunFailed = async (runId: string, message: string) => {
   await dbRetry(() =>
@@ -78,6 +138,7 @@ const markRunFailed = async (runId: string, message: string) => {
   );
 
   await logActivity("worker", `Run FAILED: ${message}`, "ERROR", { runId, reason: message });
+  await notifyBroadcastFailed(runId, message);
 };
 
 const selectAccount = async (accountId?: string, currentRunId?: string) => {
@@ -618,6 +679,16 @@ const sendOneCycle = async (params: {
 
         if (severity === "fatal") {
           // Session is dead — fail the entire run
+          await safeDbWrite(() =>
+            prisma.telegramAccount.update({
+              where: { id: params.accountId },
+              data: {
+                status: TelegramConnectionStatus.DISCONNECTED,
+                encryptedSession: null
+              }
+            })
+          );
+
           await markRunFailed(runId, `Session invalid: ${sendResult.errorMessage}`);
           return {
             status: "failed",
@@ -863,7 +934,10 @@ const processBroadcastRun = async (runId: string) => {
   const intervalMs = hasBatchInterval ? run.intervalMinutes! * 60 * 1000 : 0;
 
   const maxCycles = hasBatchInterval
-    ? Math.max(1, Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!))
+    ? Math.min(
+        MAX_BROADCAST_CYCLES,
+        Math.max(1, Math.floor((run.totalDurationHours! * 60) / run.intervalMinutes!))
+      )
     : 1;
 
   // Resume: start from where we left off
@@ -887,6 +961,18 @@ const processBroadcastRun = async (runId: string) => {
     resumeFromCycle: completedCycles,
     accountPhone: account.phone
   });
+
+  await notifyTelegram("Broadcast dimulai", [
+    `Nama: ${formatRunName(run)}`,
+    `Run ID: ${run.id}`,
+    `Akun: ${account.label} (${account.phone})`,
+    `Mode: ${hasBatchInterval ? "Batch interval" : "Single run"}`,
+    `Total group: ${allGroups.length}`,
+    hasBatchInterval ? `Durasi: ${run.totalDurationHours} jam` : null,
+    hasBatchInterval ? `Interval: ${run.intervalMinutes} menit` : null,
+    hasBatchInterval ? `Total siklus: ${safeMaxCycles}` : null,
+    `Mulai: ${formatDateTime(new Date())}`
+  ]);
 
   if (hasBatchInterval) {
     // ═══════════════════════════════════════════════════════
@@ -928,6 +1014,14 @@ const processBroadcastRun = async (runId: string) => {
           totalSent,
           totalFailed
         });
+        await notifyTelegram("Broadcast berhenti", [
+          `Nama: ${formatRunName(run)}`,
+          `Run ID: ${run.id}`,
+          "Alasan: run dihentikan/dijeda dari luar worker",
+          `Siklus selesai: ${completedCycles}`,
+          `Sent: ${totalSent}`,
+          `Failed: ${totalFailed}`
+        ]);
         return; // Don't mark as completed
       }
 
@@ -1045,16 +1139,20 @@ const processBroadcastRun = async (runId: string) => {
 
       // ═══ INTERVAL WAIT ═══
       const cycleFinishedAt = Date.now();
-      const nextCycleAt = new Date(cycleFinishedAt + intervalMs);
+      const nextScheduledAtMs = broadcastStartTime + (completedCycles * intervalMs);
+      const nextCycleAt = new Date(Math.max(cycleFinishedAt + COOLDOWN_AFTER_CYCLE_MS, nextScheduledAtMs));
 
       // Check if there's enough time for next cycle
       const elapsedAfterCycle = cycleFinishedAt - broadcastStartTime;
-      if (elapsedAfterCycle + intervalMs > totalDurationMs) {
+      const finalAllowedStartMs = broadcastStartTime + totalDurationMs;
+      if (nextScheduledAtMs > finalAllowedStartMs) {
         await logActivity("worker", "Tidak cukup waktu untuk siklus berikutnya", "INFO", {
           runId: run.id,
           completedCycles,
           remainingMs: totalDurationMs - elapsedAfterCycle,
-          intervalMs
+          intervalMs,
+          nextScheduledAt: new Date(nextScheduledAtMs).toISOString(),
+          finalAllowedStartAt: new Date(finalAllowedStartMs).toISOString()
         });
         break;
       }
@@ -1113,6 +1211,14 @@ const processBroadcastRun = async (runId: string) => {
           runId: run.id,
           completedCycles
         });
+        await notifyTelegram("Broadcast berhenti", [
+          `Nama: ${formatRunName(run)}`,
+          `Run ID: ${run.id}`,
+          "Alasan: run dihentikan/dijeda saat menunggu interval",
+          `Siklus selesai: ${completedCycles}`,
+          `Sent: ${totalSent}`,
+          `Failed: ${totalFailed}`
+        ]);
         return;
       }
 
@@ -1201,6 +1307,17 @@ const processBroadcastRun = async (runId: string) => {
     totalDuration: formatDuration(Date.now() - broadcastStartTime)
   });
 
+  await notifyTelegram("Broadcast selesai", [
+    `Nama: ${formatRunName(run)}`,
+    `Run ID: ${run.id}`,
+    `Akun: ${account.label} (${account.phone})`,
+    `Siklus selesai: ${completedCycles}`,
+    `Sent: ${totalSent}`,
+    `Failed: ${totalFailed}`,
+    `Durasi jalan: ${formatDuration(Date.now() - broadcastStartTime)}`,
+    `Selesai: ${formatDateTime(new Date())}`
+  ]);
+
   // Release the Telegram client connection for this account
   await mtprotoSender.releaseClient(account.encryptedSession!);
 };
@@ -1229,6 +1346,10 @@ const resumeDuePausedRuns = async () => {
     await logActivity("worker", `${resumed.count} run auto-resumed dari pause`, "INFO", {
       resumedCount: resumed.count
     });
+
+    await notifyTelegram("Broadcast auto-resume", [
+      `${resumed.count} broadcast dilanjutkan otomatis setelah cooldown selesai.`
+    ]);
   }
 };
 
@@ -1348,6 +1469,11 @@ const processTick = async () => {
                   }
                 })
               );
+              await notifyTelegram("Broadcast retry otomatis", [
+                `Run ID: ${pending.id}`,
+                "Alasan: koneksi database sempat terputus",
+                `Error: ${errorMsg.slice(0, 150)}`
+              ]);
             } catch {
               // If even this fails, the recoverStaleRunningRuns will pick it up
             }
@@ -1364,6 +1490,7 @@ const processTick = async () => {
                   }
                 })
               );
+              await notifyBroadcastFailed(pending.id, `Unexpected error: ${errorMsg}`);
             } catch {
               // Best effort
             }
